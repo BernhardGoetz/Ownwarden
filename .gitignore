@@ -1,0 +1,7 @@
+node_modules/
+vendor/
+*.log
+.DS_Store
+# Testdaten, die Tests zur Laufzeit erzeugen
+core/test/.tmp/
+tools/webdav-test-server/data/

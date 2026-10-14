@@ -1,0 +1,28 @@
+{
+  "name": "@ownwarden/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ownwarden-Kern: KDBX4 lesen/schreiben, Feld-Merge, WebDAV-Sync (Prototyp)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "proto": "tsx src/cli/ownwarden-proto.ts",
+    "webdav-probe": "tsx src/cli/webdav-probe.ts"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@xmldom/xmldom": "0.9.12",
+    "hash-wasm": "4.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}
