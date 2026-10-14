@@ -1,0 +1,2 @@
+# Ownwarden
+Bitwarden zum Selbsthosten
