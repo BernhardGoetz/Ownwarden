@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Von Hand erstellt: Besonderheiten anderer Programme, die Ownwarden tolerieren muss. -->
+<KeePassFile>
+  <Meta>
+    <Generator>KeePass</Generator>
+    <HeaderHash>AAAA</HeaderHash>
+    <DatabaseName>Fremd</DatabaseName>
+    <DatabaseNameChanged>2026-01-02T03:04:05Z</DatabaseNameChanged>
+    <PluginData><Secret Protected="True">plugin-geheimnis</Secret><Plain>offen</Plain></PluginData>
+    <RecycleBinEnabled>false</RecycleBinEnabled>
+    <Binaries><Binary ID="0">AAAA</Binary></Binaries>
+    <CustomData>
+      <Item><Key>doppelt</Key><Value>erster</Value></Item>
+      <Item><Key>doppelt</Key><Value>zweiter</Value></Item>
+    </CustomData>
+  </Meta>
+  <ForeignTopLevel/>
+  <Root>
+    <Group>
+      <UUID>BOAjqnBuvJQoczAc1LOewQ==</UUID>
+      <Name><![CDATA[Wurzel <CDATA>]]></Name>
+      <Times>
+        <LastModificationTime>2026-03-01T14:00:00+02:00</LastModificationTime>
+        <CreationTime>2026-01-02T03:04:05.987Z</CreationTime>
+        <Expires>TRUE</Expires>
+      </Times>
+      <Entry>
+        <UUID>C7IrT/JEypakB1/cITyCjA==</UUID>
+        <Tags> Bank , Privat;Bank;; </Tags>
+        <String><Key>Title</Key><Value>Fremder Eintrag</Value></String>
+        <String><Key>Password</Key><Value Protected="true">klein-geschrieben</Value></String>
+        <String><Key>Exportiert</Key><Value ProtectInMemory="True">klartext-export</Value></String>
+        <String><Key>Leerzeichen</Key><Value>   </Value></String>
+        <!-- Ein Kommentar mitten im Eintrag -->
+        <PluginEntryData>
+          <Nested><Value Protected="True">im-unbekannten-element</Value></Nested>
+        </PluginEntryData>
+        <History>
+          <Entry>
+            <UUID>C7IrT/JEypakB1/cITyCjA==</UUID>
+            <String><Key>Password</Key><Value Protected="True">verlauf</Value></String>
+          </Entry>
+        </History>
+      </Entry>
+    </Group>
+    <ForeignRootChild><X Protected="True">am-ende</X></ForeignRootChild>
+    <DeletedObjects/>
+  </Root>
+</KeePassFile>
