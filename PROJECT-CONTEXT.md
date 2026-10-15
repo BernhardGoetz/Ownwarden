@@ -23,6 +23,7 @@ Nicht geplant: Teilen/Organisationen, Send, Notfallzugriff, Web-Vault, eigener S
 - Passkeys erstellen, speichern und verwenden (Browser und Android).
 - Sperren mit Zeitlimit, Entsperren per Master-Passwort (Android zusätzlich Biometrie).
 - Offline nutzbar: Jeder Client hält eine verschlüsselte lokale Kopie und synchronisiert, sobald er online ist.
+- Dateianhänge an Einträgen (entschieden 2026-10-14).
 - Import des Bitwarden-JSON-Exports. Ein eigener Export ist nicht nötig: Die KDBX-Datei ist selbst das Exportformat.
 
 ## Getroffene Entscheidungen (Council, 2026-10-14)
@@ -78,13 +79,18 @@ ignoriert werden muss.
 - **Gruppen:** Elterngruppe eines Eintrags ist ein Feld (Zeitstempel: `LocationChanged`). Gruppen selbst werden nach
   denselben Regeln zusammengeführt (Name, Elterngruppe, Löschung). Einträge, deren Gruppe auf einem anderen Gerät
   gelöscht wurde, gehen nicht verloren (Vorschlag: Wiederherstellungsgruppe).
-- **Verlauf:** Die überschriebene Fassung eines Eintrags kommt in dessen Verlauf – ein Eintrag pro Abgleich, nicht
-  pro Gerät. Verläufe beider Seiten werden nach Zeitstempel vereinigt und von Doppelten befreit. Die Grenzen aus der
+- **Verlauf:** Die überschriebene Fassung jeder Seite kommt in den Verlauf des Eintrags – also bis zu zwei Einträge
+  pro Abgleich, wenn beide Geräte verschiedene Felder geändert haben (entschieden 2026-10-15: kein alter Wert soll
+  verloren gehen). Verläufe beider Seiten werden nach Zeitstempel (ganze Sekunden) vereinigt und von Doppelten befreit. Die Grenzen aus der
   Datei (`HistoryMaxItems`, `HistoryMaxSize`) gelten, ältere Fassungen fallen also irgendwann heraus. Gewinnt eine
   Löschung, sind die Daten aus der Datei weg und nur noch in Backups.
 - **Uhren:** Neue Zeitstempel nie kleiner als der größte bekannte Zeitstempel + 1 ms. Zusätzlich die Gerätezeit gegen
   den `Date`-Header des WebDAV-Servers prüfen; bei deutlicher Abweichung warnen, statt still zu schreiben
   (Schwellwert im Prototyp festlegen).
+- **Datenbank-Einstellungen ohne Zeitstempel** (Verschlüsselung, Schlüsselableitung, Kompression,
+  `HistoryMaxItems`/`HistoryMaxSize`, übrige Meta-Angaben wie die Beschreibung): Die Fassung der Datei auf dem Server
+  gewinnt (entschieden 2026-10-15). Ownwarden ändert diese Einstellungen in Version 1 nicht; so kann ein Gerät mit
+  älterer Kopie eine Änderung aus KeePassXC nicht still zurückdrehen.
 - **KeePassXC nicht zum Synchronisieren benutzen:** Die Datei in KeePassXC öffnen, ändern und speichern ist in
   Ordnung. Das Zusammenführen von KeePassXC (Datenbank zusammenführen, automatisches Neuladen bei Änderungen)
   arbeitet aber pro Eintrag statt pro Feld und übernimmt Löschungen im Standardmodus nicht – gelöschte Einträge
@@ -163,8 +169,8 @@ ignoriert werden muss.
 - Android: Browser-Freigabeliste mit Signaturprüfung, Bindung an App-Signaturen, Digital Asset Links (siehe oben).
 
 ## Annahmen, die im Prototyp geprüft werden müssen
-- KeePassXC (geprüft im Quellcode) und KeePassDX/Strongbox (ungeprüft) erhalten `Ownwarden.FieldTimes` und die
-  Passkey-Attribute beim Speichern.
+- KeePassDX und Strongbox erhalten `Ownwarden.FieldTimes` und die Passkey-Attribute beim Speichern (ungeprüft).
+  Für KeePassXC 2.7.6 ist das inzwischen durch Tests belegt (siehe „Bestätigte Fakten“).
 - Strongbox auf dem iPad unterstützt KDBX-4.1-spezifische Felder (ungeprüft).
 - MagentaCLOUD unterstützt bedingtes Schreiben mit `If-Match` (für Nextcloud im Quellcode belegt, für den
   Telekom-Betrieb nicht). Nutzer berichteten nach der Umstellung 2021 von unzuverlässigem WebDAV.
@@ -172,14 +178,25 @@ ignoriert werden muss.
 - Ein abgebrochener Upload lässt die bisherige Datei auf dem Server unverändert.
 - Der Bitwarden-JSON-Export enthält keine Anhänge (vermutlich; prüfen).
 
-## Aktuelle Phase
-Phase 0 – Planung und Wegwerf-Prototypen. Das Repo enthält noch keinen Anwendungscode.
+## Bestätigte Fakten (durch Tests gegen KeePassXC 2.7.6, Stand 2026-10-15)
+- `Ownwarden.FieldTimes` übersteht Bearbeiten und Speichern in KeePassXC. KeePassXC kopiert CustomData aber NICHT in
+  die Verlaufseinträge, die es beim Bearbeiten anlegt.
+- KeePassXC setzt bei jedem Öffnen `_LAST_MODIFIED` in CustomData von Meta, Gruppen und Einträgen neu.
+- KeePassXC normalisiert beim Speichern: Tags sortiert und mit `,` getrennt, Anhänge nach Namen sortiert und alle
+  als geschützt markiert, leere Standardfelder werden angelegt, CR wird zu LF, Standard-`<AutoType>` wird ergänzt,
+  IconID wird 0, wenn ein eigenes Icon gesetzt ist. Ownwarden wertet das nicht als Änderung.
+- `keepassxc-cli db-create` (2.7.6) schreibt KDBX 3.1 mit AES-KDF; Ownwarden liest nur KDBX 4.x.
 
-## Geplante Repo-Struktur
-- `spec/` – Formatnotizen, Referenz-KDBX-Dateien (mit KeePassXC erzeugt), Merge-Testfälle
-- `extension/` – Browser-Erweiterung (TypeScript, Manifest V3)
-- `android/` – Android-App (Kotlin)
-- `docs/adr/` – Architekturentscheidungen
+## Aktuelle Phase
+Phase 0 – Prototyp des TypeScript-Kerns, gebaut in Etappen (jede mit kritischer Prüfung):
+1. KDBX4-Container ✅  2. XML-Modell ✅  3. Feld-Merge ✅  4. WebDAV-Sync ⏳  5. Zusammenführen, CLI, Anleitung ⬜
+Nur für Testdaten gedacht.
+
+## Repo-Struktur
+- `core/` – TypeScript-Kern (KDBX4, Feld-Merge, WebDAV-Sync), später von der Erweiterung genutzt
+- `spec/` – sprachunabhängige Merge-Testfälle und Feld-Vektoren (auch für die spätere Kotlin-Implementierung)
+- `tools/` – Hilfsmittel, z. B. ein WebDAV-Testserver
+- geplant: `extension/` (Browser-Erweiterung, Manifest V3), `android/` (Kotlin), `docs/adr/`
 
 ## Roadmap
 0. **Prototypen:**
@@ -196,7 +213,6 @@ Phase 0 – Planung und Wegwerf-Prototypen. Das Repo enthält noch keinen Anwend
 5. iPad.
 
 ## Offene Punkte
-- Anhänge in Version 1? (Bitwarden kennt Dateianhänge; KDBX speichert sie in einem gemeinsamen Binär-Pool.)
 - Verteilung der Erweiterung: Chrome Web Store (nicht gelistet) oder Entwicklermodus.
 - Verteilung der Android-App: eigene signierte APK (Sideload) oder Store.
 - KDBX-Version beim Schreiben (4.0 oder 4.1) und unterstützte Varianten beim Lesen (Twofish, AES-KDF).
