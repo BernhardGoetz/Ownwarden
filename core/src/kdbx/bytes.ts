@@ -111,16 +111,29 @@ export class ByteReader {
   }
 }
 
+/**
+ * Prüft, dass `value` eine ganze Zahl im Bereich [min, max] ist. DataView würde zu große
+ * Werte sonst stillschweigend abschneiden (modulo 2^n) – eine falsche Längenangabe in der
+ * Datei wäre die Folge.
+ */
+function checkIntRange(value: number, min: number, max: number, typeName: string): void {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new RangeError(`Kein ${typeName}: ${value}`);
+  }
+}
+
 /** Sammelt Bytes und setzt sie am Ende zu einem Array zusammen. */
 export class ByteWriter {
   private readonly parts: Uint8Array[] = [];
   private length = 0;
 
   writeU8(value: number): this {
-    return this.writeBytes(Uint8Array.of(value & 0xff));
+    checkIntRange(value, 0, 0xff, "uint8");
+    return this.writeBytes(Uint8Array.of(value));
   }
 
   writeU16(value: number): this {
+    checkIntRange(value, 0, 0xffff, "uint16");
     const bytes = new Uint8Array(2);
     new DataView(bytes.buffer).setUint16(0, value, true);
     return this.writeBytes(bytes);
@@ -131,6 +144,7 @@ export class ByteWriter {
   }
 
   writeI32(value: number): this {
+    checkIntRange(value, -0x80000000, 0x7fffffff, "int32");
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setInt32(0, value, true);
     return this.writeBytes(bytes);
@@ -141,6 +155,9 @@ export class ByteWriter {
   }
 
   writeI64(value: bigint): this {
+    if (value < -(2n ** 63n) || value > 2n ** 63n - 1n) {
+      throw new RangeError(`Kein int64: ${value}`);
+    }
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigInt64(0, value, true);
     return this.writeBytes(bytes);
@@ -163,9 +180,7 @@ export class ByteWriter {
 
 /** uint32 als 4 Byte Little Endian. */
 export function u32le(value: number): Uint8Array {
-  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
-    throw new RangeError(`Kein uint32: ${value}`);
-  }
+  checkIntRange(value, 0, 0xffffffff, "uint32");
   const bytes = new Uint8Array(4);
   new DataView(bytes.buffer).setUint32(0, value, true);
   return bytes;
