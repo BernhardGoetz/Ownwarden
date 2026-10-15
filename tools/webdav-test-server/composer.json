@@ -1,0 +1,14 @@
+{
+    "name": "ownwarden/webdav-test-server",
+    "description": "NUR FÜR TESTS: WebDAV-Server auf Basis von SabreDAV, der das Verhalten von Nextcloud beim Schreiben nachbildet.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1",
+        "sabre/dav": "^4.7"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {}
+    }
+}
