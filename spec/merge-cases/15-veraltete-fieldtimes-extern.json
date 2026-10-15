@@ -1,0 +1,149 @@
+{
+  "name": "15-veraltete-fieldtimes-extern",
+  "description": "Beide Einträge hat Ownwarden zuletzt bei T0+1 s versiegelt. Auf remote ändert KeePassXC danach das Passwort (FieldTimes bleiben stehen, der Fingerabdruck passt nicht mehr) – das Feld bekommt die Änderungszeit des Eintrags (T0+5 s). Auf local ändert Ownwarden das Passwort: bei e1 vorher (T0+3 s, KeePassXC gewinnt), bei e2 nachher (T0+6 s, Ownwarden gewinnt).",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "own"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000003000,
+          "parent": 1700000000000
+        }
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000006000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "own2"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000006000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000001000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "p1"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000001000,
+          "parent": 1700000000000
+        },
+        "external": {
+          "lastModification": 1700000005000,
+          "set": {
+            "Password": "kpxc"
+          },
+          "protected": [
+            "Password"
+          ]
+        }
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000001000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "p1"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000001000,
+          "parent": 1700000000000
+        },
+        "external": {
+          "lastModification": 1700000005000,
+          "set": {
+            "Password": "kpxc2"
+          },
+          "protected": [
+            "Password"
+          ]
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "Password": "kpxc"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000005000,
+          "s:Title": 1700000000000
+        }
+      },
+      {
+        "uuid": "e2",
+        "fields": {
+          "Title": "Mail",
+          "Password": "own2"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000006000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "externalEdits": [
+      "e1",
+      "e2"
+    ],
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "remote",
+        "tieBreak": false
+      },
+      {
+        "entry": "e2",
+        "field": "s:Password",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}

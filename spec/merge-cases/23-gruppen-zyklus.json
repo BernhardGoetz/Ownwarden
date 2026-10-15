@@ -1,0 +1,84 @@
+{
+  "name": "23-gruppen-zyklus",
+  "description": "local verschiebt Gruppe A unter B, remote (später) B unter A. Zusammen ergäbe das einen Kreis ohne Verbindung zur Wurzel. Die ältere Verschiebung (A) wird rückgängig gemacht: A kommt direkt unter die Wurzel (mit neuer Verschiebezeit = now), B bleibt unter A.",
+  "now": 1700000100000,
+  "local": {
+    "groups": [
+      {
+        "uuid": "B",
+        "name": "B",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "A",
+        "name": "A",
+        "parent": "B",
+        "lastModification": 1700000000000,
+        "locationChanged": 1700000002000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "A",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "In A"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "A",
+        "name": "A",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "B",
+        "name": "B",
+        "parent": "A",
+        "lastModification": 1700000000000,
+        "locationChanged": 1700000003000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "A",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "In A"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "A",
+        "name": "A",
+        "parent": "root",
+        "locationChanged": 1700000100000
+      },
+      {
+        "uuid": "B",
+        "name": "B",
+        "parent": "A",
+        "locationChanged": 1700000003000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "A",
+        "fields": {
+          "Title": "In A"
+        }
+      }
+    ]
+  }
+}

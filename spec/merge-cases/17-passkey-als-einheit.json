@@ -1,0 +1,101 @@
+{
+  "name": "17-passkey-als-einheit",
+  "description": "Beide Seiten ersetzen den Passkey (alle KPEX_PASSKEY_*-Attribute zusammen sind EIN Feld). Der neuere Passkey (remote, ohne USER_HANDLE) gewinnt vollständig – es entsteht keine Mischung aus beiden. Der Titel (local, neuer) wird getrennt entschieden.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000004000,
+        "locationChanged": 1700000000000,
+        "tags": [
+          "Passkey"
+        ],
+        "protected": [
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM"
+        ],
+        "fields": {
+          "Title": "Site lokal",
+          "KPEX_PASSKEY_USERNAME": "lokal",
+          "KPEX_PASSKEY_CREDENTIAL_ID": "id-lokal",
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM": "pem-lokal",
+          "KPEX_PASSKEY_RELYING_PARTY": "site.example",
+          "KPEX_PASSKEY_USER_HANDLE": "h-lokal"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000004000,
+          "passkey": 1700000002000,
+          "tags": 1700000000000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "tags": [
+          "Passkey"
+        ],
+        "protected": [
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM"
+        ],
+        "fields": {
+          "Title": "Site",
+          "KPEX_PASSKEY_USERNAME": "fern",
+          "KPEX_PASSKEY_CREDENTIAL_ID": "id-fern",
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM": "pem-fern",
+          "KPEX_PASSKEY_RELYING_PARTY": "site.example"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "passkey": 1700000003000,
+          "tags": 1700000000000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "tags": [
+          "Passkey"
+        ],
+        "protected": [
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM"
+        ],
+        "fields": {
+          "Title": "Site lokal",
+          "KPEX_PASSKEY_USERNAME": "fern",
+          "KPEX_PASSKEY_CREDENTIAL_ID": "id-fern",
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM": "pem-fern",
+          "KPEX_PASSKEY_RELYING_PARTY": "site.example"
+        },
+        "fieldTimes": {
+          "passkey": 1700000003000,
+          "s:Title": 1700000004000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "passkey",
+        "winner": "remote",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:Title",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}

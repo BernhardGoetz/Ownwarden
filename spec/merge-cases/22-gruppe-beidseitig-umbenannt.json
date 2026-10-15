@@ -1,0 +1,68 @@
+{
+  "name": "22-gruppe-beidseitig-umbenannt",
+  "description": "Beide Seiten benennen die Gruppe um. Gruppen-Eigenschaften werden als Einheit nach der Änderungszeit der Gruppe entschieden: remote ist neuer.",
+  "local": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Banken",
+        "lastModification": 1700000002000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Giro"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Finanzen",
+        "lastModification": 1700000003000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Giro"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Finanzen",
+        "lastModification": 1700000003000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "fields": {
+          "Title": "Giro"
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "groupsChanged": 1
+  },
+  "expectedReportSwapped": {
+    "groupsChanged": 0
+  }
+}

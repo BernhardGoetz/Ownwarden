@@ -1,0 +1,73 @@
+{
+  "name": "26-keepassxc-speichert-ohne-aenderung",
+  "description": "KeePassXC hat die Datei nur geöffnet und gespeichert: Es legt leere Standardfelder (UserName, URL, Notes) an, ändert aber keine Zeit. Das ist keine Änderung: keine Konflikte, keine externe Änderung.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000001000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000001000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {},
+        "external": {
+          "lastModification": 1700000001000,
+          "set": {
+            "UserName": "",
+            "URL": "",
+            "Notes": ""
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000001000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000001000,
+          "s:Password": 1700000001000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "externalEdits": [],
+    "fieldConflicts": [],
+    "entriesUpdated": 0
+  },
+  "expectedReportSwapped": {
+    "externalEdits": [],
+    "fieldConflicts": [],
+    "entriesUpdated": 0
+  }
+}

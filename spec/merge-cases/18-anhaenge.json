@@ -1,0 +1,78 @@
+{
+  "name": "18-anhaenge",
+  "description": "Anhänge sind Felder nach Namen: local fügt a.txt hinzu, remote b.txt – beide bleiben. Beide ändern c.txt; die neuere Fassung (remote) gewinnt.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Dok"
+        },
+        "attachments": {
+          "c.txt": "lokal",
+          "a.txt": "A"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "a:a.txt": 1700000002000,
+          "a:c.txt": 1700000003000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003500,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Dok"
+        },
+        "attachments": {
+          "c.txt": "fern",
+          "b.txt": "base64:AAEC/w=="
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "a:b.txt": 1700000002500,
+          "a:c.txt": 1700000003500,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Dok"
+        },
+        "attachments": {
+          "a.txt": "A",
+          "b.txt": "base64:AAEC/w==",
+          "c.txt": "fern"
+        },
+        "fieldTimes": {
+          "a:a.txt": 1700000002000,
+          "a:b.txt": 1700000002500,
+          "a:c.txt": 1700000003500
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "a:c.txt",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

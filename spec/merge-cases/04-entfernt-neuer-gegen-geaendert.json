@@ -1,0 +1,97 @@
+{
+  "name": "04-entfernt-neuer-gegen-geaendert",
+  "description": "local entfernt das Feld PIN (neuer), remote ändert es (älter). Die Entfernung gewinnt; der Lösch-Marker bleibt in den Feld-Zeitstempeln.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:PIN": 1700000003000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "PIN": "5678"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:PIN": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail"
+        },
+        "fieldTimes": {
+          "s:PIN": 1700000003000,
+          "s:Title": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "5678"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:PIN",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}

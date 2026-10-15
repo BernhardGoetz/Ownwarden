@@ -1,0 +1,54 @@
+{
+  "name": "29-datenbankname-und-papierkorb",
+  "description": "Datenbankweite Angaben: Der Name mit der neueren DatabaseNameChanged gewinnt, der Papierkorb mit der neueren RecycleBinChanged – unabhängig voneinander.",
+  "local": {
+    "databaseName": "Alt",
+    "databaseNameChanged": 1700000001000,
+    "recycleBin": "bin",
+    "recycleBinChanged": 1700000005000,
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "bin2",
+        "name": "Papierkorb 2",
+        "lastModification": 1700000000000
+      }
+    ]
+  },
+  "remote": {
+    "databaseName": "Neu",
+    "databaseNameChanged": 1700000002000,
+    "recycleBin": "bin2",
+    "recycleBinChanged": 1700000004000,
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "bin2",
+        "name": "Papierkorb 2",
+        "lastModification": 1700000000000
+      }
+    ]
+  },
+  "expected": {
+    "databaseName": "Neu",
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb"
+      },
+      {
+        "uuid": "bin2",
+        "name": "Papierkorb 2"
+      }
+    ]
+  }
+}

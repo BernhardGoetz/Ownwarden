@@ -1,0 +1,169 @@
+{
+  "name": "25-identisch",
+  "description": "Beide Seiten sind gleich. Das Ergebnis ist dieselbe Datenbank; der Bericht meldet nichts.",
+  "local": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Giro",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Giro",
+              "Password": "alt"
+            }
+          }
+        ]
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "old",
+        "time": 1700000001000
+      }
+    ]
+  },
+  "remote": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Giro",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Giro",
+              "Password": "alt"
+            }
+          }
+        ]
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "old",
+        "time": 1700000001000
+      }
+    ]
+  },
+  "expected": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank"
+      },
+      {
+        "uuid": "bin",
+        "name": "Papierkorb"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000002000,
+        "fields": {
+          "Title": "Giro",
+          "Password": "p"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000002000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Giro",
+              "Password": "alt"
+            }
+          }
+        ]
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "old",
+        "time": 1700000001000
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesAddedFromRemote": 0,
+    "entriesUpdated": 0,
+    "entriesDeleted": 0,
+    "entriesResurrected": 0,
+    "groupsChanged": 0,
+    "orphansRecovered": 0,
+    "fieldConflicts": [],
+    "externalEdits": []
+  },
+  "expectedReportSwapped": {
+    "entriesAddedFromRemote": 0,
+    "entriesUpdated": 0,
+    "entriesDeleted": 0,
+    "entriesResurrected": 0,
+    "groupsChanged": 0,
+    "orphansRecovered": 0,
+    "fieldConflicts": [],
+    "externalEdits": []
+  }
+}

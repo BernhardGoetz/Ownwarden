@@ -1,0 +1,93 @@
+{
+  "name": "11-verschoben-gegen-geaendert",
+  "description": "local verschiebt den Eintrag in die Gruppe Bank, remote ändert den Benutzernamen. Beides bleibt erhalten.",
+  "local": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000002000,
+        "fields": {
+          "Title": "Konto",
+          "UserName": "alice"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000000000,
+          "parent": 1700000002000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Konto",
+          "UserName": "bob"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000003000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "fields": {
+          "Title": "Konto",
+          "UserName": "bob"
+        },
+        "fieldTimes": {
+          "parent": 1700000002000,
+          "s:UserName": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "parent",
+        "winner": "local",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:UserName",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "name": "31-verlauf-gleiche-sekunde",
+  "description": "local hat im Speicher zweimal das Passwort geändert; die Fassung \"zwei\" liegt deshalb mit ms-genauer Zeit (T0+10,3 s) im Verlauf. remote ist die Datei, die nach der ersten Änderung gespeichert wurde: dieselbe Fassung \"zwei\", aber nur sekundengenau (T0+10 s). Beim Zusammenführen kommt sie als überschriebene Fassung von remote in den Verlauf – sie darf dort nur EINMAL stehen (Doppelte: gleiche ganze Sekunde, gleicher Inhalt). Welche der beiden Zeiten bleibt, entscheidet der Rohdaten-Fingerabdruck (spec/README.md, Abschnitt 5.1).",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000020500,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "drei"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000020500,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000010300,
+            "fields": {
+              "Title": "Mail",
+              "Password": "zwei"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000010000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "zwei"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000010300,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "Password": "drei"
+        },
+        "protected": [
+          "Password"
+        ],
+        "history": [
+          {
+            "lastModification": 1700000010000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "zwei"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

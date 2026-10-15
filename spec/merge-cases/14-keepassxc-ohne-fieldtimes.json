@@ -1,0 +1,136 @@
+{
+  "name": "14-keepassxc-ohne-fieldtimes",
+  "description": "Ein in KeePassXC angelegter Eintrag ohne Feld-Zeitstempel. local (Ownwarden) ändert das Passwort, remote (KeePassXC) danach den Benutzernamen. KeePassXC hat die vorherige Fassung in den Verlauf gelegt; daran sieht Ownwarden, dass KeePassXC das Passwort NICHT geändert hat. Beide Änderungen bleiben erhalten.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "u0",
+          "Password": "p1"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "u0",
+              "Password": "p0"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "u1",
+          "Password": "p0"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": null,
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "u0",
+              "Password": "p0"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "u1",
+          "Password": "p1"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000003000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "u0",
+              "Password": "p0"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "u0",
+              "Password": "p1"
+            }
+          },
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "u1",
+              "Password": "p0"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "externalEdits": [],
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "local",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:UserName",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

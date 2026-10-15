@@ -1,0 +1,96 @@
+{
+  "name": "05-geaendert-neuer-gegen-entfernt",
+  "description": "local entfernt das Feld PIN (älter), remote ändert es (neuer). Die Änderung gewinnt, das Feld kommt zurück.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:PIN": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "PIN": "5678"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:PIN": 1700000003000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "PIN": "5678"
+        },
+        "fieldTimes": {
+          "s:PIN": 1700000003000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "PIN": "1234"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:PIN",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

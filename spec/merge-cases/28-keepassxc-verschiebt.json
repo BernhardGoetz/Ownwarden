@@ -1,0 +1,100 @@
+{
+  "name": "28-keepassxc-verschiebt",
+  "description": "Auf remote verschiebt KeePassXC einen von Ownwarden versiegelten Eintrag in die Gruppe Bank (locationChanged = T0+5 s; der Fingerabdruck von parent passt nicht mehr). local ändert das Passwort. Beides bleibt erhalten.",
+  "local": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Konto",
+          "Password": "neu"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000003000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000000000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Konto",
+          "Password": "alt"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000000000,
+          "parent": 1700000000000
+        },
+        "external": {
+          "lastModification": 1700000005000,
+          "parent": "bank",
+          "locationChanged": 1700000005000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "fields": {
+          "Title": "Konto",
+          "Password": "neu"
+        },
+        "fieldTimes": {
+          "parent": 1700000005000,
+          "s:Password": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "externalEdits": [
+      "e1"
+    ],
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "parent",
+        "winner": "remote",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}

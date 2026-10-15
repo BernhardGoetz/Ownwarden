@@ -1,0 +1,124 @@
+{
+  "name": "06-umbenannt-und-anderes-feld",
+  "description": "local benennt das Feld PIN in Geheimzahl um (= PIN entfernen + Geheimzahl anlegen), remote ändert den Benutzernamen. Beides bleibt erhalten; PIN kommt nicht zurück.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "alice",
+          "Geheimzahl": "1234"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000000000,
+          "s:PIN": 1700000002000,
+          "s:Geheimzahl": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "bob",
+          "PIN": "1234"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000003000,
+          "s:PIN": 1700000000000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "UserName": "bob",
+          "Geheimzahl": "1234"
+        },
+        "fieldTimes": {
+          "s:PIN": 1700000002000,
+          "s:Geheimzahl": 1700000002000,
+          "s:UserName": 1700000003000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "PIN": "1234"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "Geheimzahl": "1234"
+            }
+          },
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "bob",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:PIN",
+        "winner": "local",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:UserName",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

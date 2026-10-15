@@ -1,0 +1,83 @@
+{
+  "name": "03-gleicher-zeitstempel",
+  "description": "Beide Seiten ändern dasselbe Feld zur selben Millisekunde. Die feste Regel entscheidet: Bei gleichem Zeitstempel gewinnt der größere kanonische Wert (\"bbb\" > \"aaa\") – in beiden Richtungen gleich.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "aaa"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "bbb"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "bbb"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000002000
+        },
+        "history": [
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "aaa"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "remote",
+        "tieBreak": true
+      }
+    ]
+  }
+}

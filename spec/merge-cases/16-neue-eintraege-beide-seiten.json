@@ -1,0 +1,72 @@
+{
+  "name": "16-neue-eintraege-beide-seiten",
+  "description": "Beide Seiten legen unabhängig neue Einträge an. Alle bleiben erhalten.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Gemeinsam"
+        },
+        "fieldTimes": {}
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000002000,
+        "fields": {
+          "Title": "Lokal neu"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Gemeinsam"
+        },
+        "fieldTimes": {}
+      },
+      {
+        "uuid": "e3",
+        "lastModification": 1700000003000,
+        "fields": {
+          "Title": "Fern neu"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Gemeinsam"
+        }
+      },
+      {
+        "uuid": "e2",
+        "fields": {
+          "Title": "Lokal neu"
+        }
+      },
+      {
+        "uuid": "e3",
+        "fields": {
+          "Title": "Fern neu"
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesAddedFromRemote": 1,
+    "entriesUpdated": 0,
+    "entriesDeleted": 0,
+    "fieldConflicts": []
+  }
+}

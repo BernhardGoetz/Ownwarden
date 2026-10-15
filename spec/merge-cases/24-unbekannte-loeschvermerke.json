@@ -1,0 +1,76 @@
+{
+  "name": "24-unbekannte-loeschvermerke",
+  "description": "Lösch-Vermerke für UUIDs, die zu keinem Eintrag und keiner Gruppe gehören (z. B. gelöschte Icons), bleiben erhalten; bei gleicher UUID gilt die spätere Löschzeit.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "icon1",
+        "time": 1700000001000
+      },
+      {
+        "uuid": "x",
+        "time": 1700000002000
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "icon1",
+        "time": 1700000003000
+      },
+      {
+        "uuid": "y",
+        "time": 1700000000500
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "fields": {
+          "Title": "Bleibt"
+        }
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "icon1",
+        "time": 1700000003000
+      },
+      {
+        "uuid": "x",
+        "time": 1700000002000
+      },
+      {
+        "uuid": "y",
+        "time": 1700000000500
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "fieldConflicts": []
+  }
+}

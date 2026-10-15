@@ -1,0 +1,145 @@
+{
+  "name": "01-verschiedene-felder",
+  "description": "Beide Seiten ändern verschiedene Felder desselben Eintrags: local das Passwort, remote den Benutzernamen. Beide Änderungen bleiben erhalten; beide Fassungen landen im Verlauf.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "alice",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "alice2",
+          "Password": "alt"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000003000,
+          "s:Password": 1700000000000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "alice2",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:UserName": 1700000003000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "Password": "alt"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice",
+              "Password": "neu"
+            }
+          },
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "Mail",
+              "UserName": "alice2",
+              "Password": "alt"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesUpdated": 1,
+    "entriesDeleted": 0,
+    "entriesAddedFromRemote": 0,
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "local",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:UserName",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ],
+    "externalEdits": []
+  }
+}

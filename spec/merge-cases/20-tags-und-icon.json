@@ -1,0 +1,76 @@
+{
+  "name": "20-tags-und-icon",
+  "description": "Tags und Icon sind eigene Felder: local ändert die Tags (neuer als die Tag-Änderung von remote), remote ändert das Icon. Ergebnis: Tags von local, Icon von remote.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "X"
+        },
+        "tags": [
+          "Privat",
+          "Bank"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "tags": 1700000002000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "X"
+        },
+        "tags": [
+          "Arbeit"
+        ],
+        "iconId": 12,
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "tags": 1700000001500,
+          "icon": 1700000003000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "X"
+        },
+        "tags": [
+          "Bank",
+          "Privat"
+        ],
+        "iconId": 12,
+        "fieldTimes": {
+          "tags": 1700000002000,
+          "icon": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "tags",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}

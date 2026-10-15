@@ -1,0 +1,80 @@
+{
+  "name": "08-geaendert-neuer-gegen-geloescht",
+  "description": "local löscht den Eintrag (älter), remote ändert ihn danach (neuer). Die Änderung gewinnt: Der Eintrag kommt zurück, sein Lösch-Vermerk verschwindet.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e1",
+        "time": 1700000002000
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000003000,
+          "parent": 1700000000000
+        }
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000003000
+        }
+      },
+      {
+        "uuid": "e2",
+        "fields": {
+          "Title": "Bleibt"
+        }
+      }
+    ],
+    "deleted": []
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "entriesResurrected": 1,
+    "entriesAddedFromRemote": 0
+  }
+}

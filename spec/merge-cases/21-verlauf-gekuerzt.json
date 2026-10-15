@@ -1,0 +1,112 @@
+{
+  "name": "21-verlauf-gekuerzt",
+  "description": "HistoryMaxItems = 3. Vereinigter Verlauf (gemeinsame Fassungen V1–V3 nur einmal) plus die überschriebenen Fassungen beider Seiten ergibt 5 Fassungen; die ältesten fallen heraus.",
+  "local": {
+    "historyMaxItems": 3,
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000004000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "L"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000004000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000001000,
+            "fields": {
+              "Title": "V1"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "V2"
+            }
+          },
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "V3"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "historyMaxItems": 3,
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000005000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "V3",
+          "Notes": "R"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000003000,
+          "s:Notes": 1700000005000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000001000,
+            "fields": {
+              "Title": "V1"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "V2"
+            }
+          },
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "V3"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "L",
+          "Notes": "R"
+        },
+        "history": [
+          {
+            "lastModification": 1700000003000,
+            "fields": {
+              "Title": "V3"
+            }
+          },
+          {
+            "lastModification": 1700000004000,
+            "fields": {
+              "Title": "L"
+            }
+          },
+          {
+            "lastModification": 1700000005000,
+            "fields": {
+              "Title": "V3",
+              "Notes": "R"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "name": "10-papierkorb-gegen-geaendert",
+  "description": "local verschiebt den Eintrag in den Papierkorb (das ist nur eine Änderung der Elterngruppe, keine Löschung), remote ändert danach das Passwort. Ergebnis: Eintrag im Papierkorb mit neuem Passwort.",
+  "local": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bin",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000002000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "alt"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000000000,
+          "parent": 1700000002000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000003000,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "recycleBin": "bin",
+    "groups": [
+      {
+        "uuid": "bin",
+        "name": "Papierkorb"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bin",
+        "locationChanged": 1700000002000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "fieldTimes": {
+          "parent": 1700000002000,
+          "s:Password": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "parent",
+        "winner": "local",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

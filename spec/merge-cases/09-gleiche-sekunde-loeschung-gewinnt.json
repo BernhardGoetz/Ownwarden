@@ -1,0 +1,68 @@
+{
+  "name": "09-gleiche-sekunde-loeschung-gewinnt",
+  "description": "Löschung und Änderung in derselben Sekunde (KDBX-Zeiten sind sekundengenau). Verglichen wird in ganzen Sekunden; bei Gleichstand gewinnt die Löschung.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e1",
+        "time": 1700000002000
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002900,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002900,
+          "parent": 1700000000000
+        }
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Bleibt"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e2",
+        "fields": {
+          "Title": "Bleibt"
+        }
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e1",
+        "time": 1700000002000
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 1,
+    "entriesResurrected": 0
+  }
+}

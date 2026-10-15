@@ -1,0 +1,74 @@
+{
+  "name": "30-gleiche-sekunde-speicher-gegen-datei",
+  "description": "Eine Seite liegt im Speicher (Zeiten millisekundengenau), die andere kommt aus der Datei (nur ganze Sekunden). KDBX-Zeiten zählen deshalb nur in ganzen Sekunden: Gruppe und Datenbankname wurden in derselben Sekunde geändert – Gleichstand, der größere Wert gewinnt (nicht die ms-genauere Seite). Eintrag e1 hat keine FieldTimes (KeePassXC); seine Basiszeit wird auf Sekunden abgerundet, beide Fassungen sind gleich alt, und der größere Rohwert (\"x\\r\\ny\") gewinnt. Sonst entschiede jedes Gerät zugunsten seiner eigenen Fassung im Speicher.",
+  "local": {
+    "databaseName": "Tresor Anton",
+    "databaseNameChanged": 1700000010300,
+    "groups": [
+      {
+        "uuid": "Bank",
+        "name": "Bank Anton",
+        "lastModification": 1700000010300,
+        "locationChanged": 1600000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003001,
+        "fields": {
+          "Title": "Mail",
+          "Notes": "x\r\ny"
+        }
+      }
+    ]
+  },
+  "remote": {
+    "databaseName": "Tresor Zebra",
+    "databaseNameChanged": 1700000010000,
+    "groups": [
+      {
+        "uuid": "Bank",
+        "name": "Bank Zebra",
+        "lastModification": 1700000010000,
+        "locationChanged": 1600000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003999,
+        "fields": {
+          "Title": "Mail",
+          "Notes": "x\ny"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "databaseName": "Tresor Zebra",
+    "groups": [
+      {
+        "uuid": "Bank",
+        "name": "Bank Zebra"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "Notes": "x\r\ny"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000003000,
+          "s:Notes": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "fieldConflicts": []
+  }
+}

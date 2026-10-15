@@ -1,0 +1,85 @@
+{
+  "name": "12-gruppe-geloescht-eintrag-offline",
+  "description": "local löscht die Gruppe Bank samt Eintrag e1. Ein Gerät, das offline war, hatte VOR der Löschung den Eintrag e2 in Bank angelegt. Die Löschung gewinnt (sie ist neuer als alles in der Gruppe), aber e2 geht nicht verloren: Er kommt in die Gruppe \"Wiederhergestellt (Ownwarden)\" direkt unter der Wurzel.",
+  "now": 1700000100000,
+  "local": {
+    "deleted": [
+      {
+        "uuid": "bank",
+        "time": 1700000005000
+      },
+      {
+        "uuid": "e1",
+        "time": 1700000005000
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Giro"
+        },
+        "fieldTimes": {}
+      },
+      {
+        "uuid": "e2",
+        "parent": "bank",
+        "lastModification": 1700000003000,
+        "fields": {
+          "Title": "Neu offline"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "@recovery",
+        "name": "Wiederhergestellt (Ownwarden)",
+        "parent": "root",
+        "lastModification": 1700000100000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e2",
+        "parent": "@recovery",
+        "locationChanged": 1700000100000,
+        "fields": {
+          "Title": "Neu offline"
+        },
+        "fieldTimes": {
+          "parent": 1700000100000,
+          "s:Title": 1700000003000
+        }
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "bank",
+        "time": 1700000005000
+      },
+      {
+        "uuid": "e1",
+        "time": 1700000005000
+      }
+    ]
+  },
+  "expectedReport": {
+    "orphansRecovered": 1,
+    "entriesDeleted": 1,
+    "entriesResurrected": 0
+  }
+}

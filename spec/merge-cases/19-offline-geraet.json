@@ -1,0 +1,102 @@
+{
+  "name": "19-offline-geraet",
+  "description": "remote war lange offline und bringt alte Änderungen mit: Notizen und URL von e1 (T0+1 s), Titel von e2 (T0+1,5 s). local hat inzwischen die Notizen neuer geändert, e2 gelöscht und e3 angelegt. Ergebnis: die alte URL-Änderung kommt an (niemand sonst hat die URL geändert), die alten Notizen nicht, e2 bleibt gelöscht.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000005000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "URL": "https://alt.example",
+          "Notes": "neu"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:URL": 1700000000000,
+          "s:Notes": 1700000005000,
+          "parent": 1700000000000
+        }
+      },
+      {
+        "uuid": "e3",
+        "lastModification": 1700000007000,
+        "fields": {
+          "Title": "Neu"
+        },
+        "fieldTimes": {}
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e2",
+        "time": 1700000006000
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000001000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "URL": "https://offline.example",
+          "Notes": "offline"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:URL": 1700000001000,
+          "s:Notes": 1700000001000,
+          "parent": 1700000000000
+        }
+      },
+      {
+        "uuid": "e2",
+        "lastModification": 1700000001500,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Forum offline"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000001500,
+          "parent": 1700000000000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "URL": "https://offline.example",
+          "Notes": "neu"
+        },
+        "fieldTimes": {
+          "s:URL": 1700000001000,
+          "s:Notes": 1700000005000
+        }
+      },
+      {
+        "uuid": "e3",
+        "fields": {
+          "Title": "Neu"
+        }
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e2",
+        "time": 1700000006000
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 1,
+    "entriesResurrected": 0
+  }
+}

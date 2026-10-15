@@ -1,0 +1,256 @@
+{
+  "description": "Prüfwerte für kanonische Feldwerte, Fingerabdrücke und Ownwarden.FieldTimes (Format: spec/README.md, Abschnitte 2–4). Jede Implementierung muss für jeden Eintrag GENAU diese Felder mit genau diesen Bytes liefern.",
+  "vectors": [
+    {
+      "name": "texte",
+      "description": "Text-Felder: leeres Standardfeld fehlt, leeres eigenes Feld ist vorhanden; Zeilenenden werden \\n; ein U+FEFF am Anfang eines GESCHÜTZTEN Werts entfällt.",
+      "entry": {
+        "uuid": "v1",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "UserName": "",
+          "Password": "geheim",
+          "Notes": "a\r\nb\rc",
+          "Leer": "",
+          "BOM": "﻿x",
+          "BOMoffen": "﻿x"
+        },
+        "protected": [
+          "Password",
+          "BOM"
+        ]
+      },
+      "fields": {
+        "s:Title": {
+          "canonical": "0000000173000000044d61696c0000000130",
+          "fingerprint": "vlHJiKcUkoYm5a-L"
+        },
+        "s:Password": {
+          "canonical": "00000001730000000667656865696d0000000131",
+          "fingerprint": "QR8neYVgvZ9FMdYM"
+        },
+        "s:Notes": {
+          "canonical": "000000017300000005610a620a630000000130",
+          "fingerprint": "YAt_WYYBwfh-Rlvn"
+        },
+        "s:Leer": {
+          "canonical": "0000000173000000000000000130",
+          "fingerprint": "BwZratglF_4fhtdT"
+        },
+        "s:BOM": {
+          "canonical": "000000017300000001780000000131",
+          "fingerprint": "9AnozNwBucNiKiK_"
+        },
+        "s:BOMoffen": {
+          "canonical": "000000017300000004efbbbf780000000130",
+          "fingerprint": "H1OUGr3KI4zJldpj"
+        },
+        "parent": {
+          "canonical": "00000006706172656e740000001853424e4a54524e2b466a47376f774856724b747565773d3d",
+          "fingerprint": "ZKWE5L8inDQMXCpy"
+        }
+      }
+    },
+    {
+      "name": "passkey",
+      "description": "Alle KPEX_PASSKEY_*/KPXC_PASSKEY_*-Attribute bilden EIN Feld, nach Namen (UTF-8-Bytes) sortiert – die Reihenfolge im Eintrag spielt keine Rolle.",
+      "entry": {
+        "uuid": "v2",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Site",
+          "KPEX_PASSKEY_USERNAME": "alice",
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM": "-----BEGIN PRIVATE KEY-----\nAAA\n-----END PRIVATE KEY-----",
+          "KPXC_PASSKEY_USERNAME": "alice",
+          "KPEX_PASSKEY_CREDENTIAL_ID": "aWQ"
+        },
+        "protected": [
+          "KPEX_PASSKEY_PRIVATE_KEY_PEM"
+        ]
+      },
+      "fields": {
+        "s:Title": {
+          "canonical": "000000017300000004536974650000000130",
+          "fingerprint": "FGwPKa8gdfkhQmFL"
+        },
+        "passkey": {
+          "canonical": "00000007706173736b65790000001a4b5045585f504153534b45595f43524544454e5449414c5f49440000000361575100000001300000001c4b5045585f504153534b45595f505249564154455f4b45595f50454d000000392d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4141410a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d0000000131000000154b5045585f504153534b45595f555345524e414d4500000005616c6963650000000130000000154b5058435f504153534b45595f555345524e414d4500000005616c6963650000000130",
+          "fingerprint": "N182KtVblE7F9Ct-"
+        },
+        "parent": {
+          "canonical": "00000006706172656e740000001853424e4a54524e2b466a47376f774856724b747565773d3d",
+          "fingerprint": "ZKWE5L8inDQMXCpy"
+        }
+      }
+    },
+    {
+      "name": "anhaenge-und-customdata",
+      "description": "Anhänge nach Namen (Schutz-Flag zählt nicht), CustomData nach Schlüssel (Zeilenenden vereinheitlicht); _LAST_MODIFIED und Ownwarden.FieldTimes sind keine Felder.",
+      "entry": {
+        "uuid": "v3",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Dok"
+        },
+        "attachments": {
+          "a.txt": "A",
+          "bild.bin": "base64:AAEC/w=="
+        },
+        "customData": {
+          "Typ": "login\r\nx",
+          "_LAST_MODIFIED": "Thu Oct 15 11:11:11 2026 GMT"
+        }
+      },
+      "fields": {
+        "s:Title": {
+          "canonical": "000000017300000003446f6b0000000130",
+          "fingerprint": "1coYPSzLPf_dkE8n"
+        },
+        "a:a.txt": {
+          "canonical": "00000001610000000141",
+          "fingerprint": "fj5b-Oa8yVh1Lay6"
+        },
+        "a:bild.bin": {
+          "canonical": "000000016100000004000102ff",
+          "fingerprint": "1LqleTcrcmNYHr9C"
+        },
+        "cd:Typ": {
+          "canonical": "000000026364000000076c6f67696e0a78",
+          "fingerprint": "qXrt0GxSzPyWaWE6"
+        },
+        "parent": {
+          "canonical": "00000006706172656e740000001853424e4a54524e2b466a47376f774856724b747565773d3d",
+          "fingerprint": "ZKWE5L8inDQMXCpy"
+        }
+      }
+    },
+    {
+      "name": "eigenschaften",
+      "description": "Tags als sortierte Menge; mit eigenem Icon zählt nur dessen UUID; Ablaufzeit in ganzen Sekunden; misc mit QualityCheck=False und unbekannten Elementen (das Standard-AutoType von KeePassXC zählt nicht).",
+      "entry": {
+        "uuid": "v4",
+        "parent": "gruppe",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "X"
+        },
+        "tags": [
+          "Zeta",
+          "alpha",
+          "Mitte",
+          " Zeta "
+        ],
+        "iconId": 12,
+        "customIcon": "icon",
+        "foregroundColor": "#FF0000",
+        "backgroundColor": "",
+        "overrideUrl": "cmd://firefox %1",
+        "expiry": 1700000000999,
+        "qualityCheck": false,
+        "unknown": [
+          "<AutoType><Enabled>True</Enabled><DataTransferObfuscation>0</DataTransferObfuscation><DefaultSequence/></AutoType>",
+          "<Fremd>1</Fremd>"
+        ]
+      },
+      "fields": {
+        "s:Title": {
+          "canonical": "000000017300000001580000000130",
+          "fingerprint": "asRvAIRoCIH88piZ"
+        },
+        "tags": {
+          "canonical": "0000000474616773000000054d69747465000000045a65746100000005616c706861",
+          "fingerprint": "XsP6Xoa5GN0F_n7X"
+        },
+        "icon": {
+          "canonical": "0000000469636f6e000000016300000018777453305271524d35552b726a674556446954644a413d3d",
+          "fingerprint": "8sICky-Dxs2i4UGR"
+        },
+        "colors": {
+          "canonical": "00000006636f6c6f7273000000072346463030303000000000",
+          "fingerprint": "3FVFVzjg7wtHQUWm"
+        },
+        "overrideUrl": {
+          "canonical": "0000000b6f7665727269646555726c00000010636d643a2f2f66697265666f78202531",
+          "fingerprint": "UpcB4P6xB-DlGV0u"
+        },
+        "expiry": {
+          "canonical": "000000066578706972790000000a31373030303030303030",
+          "fingerprint": "Vvc3CTXNlBSqWqhc"
+        },
+        "misc": {
+          "canonical": "000000046d697363000000013000000000000000103c4672656d643e313c2f4672656d643e",
+          "fingerprint": "KRN2DCoTUnckq7EN"
+        },
+        "parent": {
+          "canonical": "00000006706172656e74000000184a487a66765a4a7169415243495a6143384830756e413d3d",
+          "fingerprint": "pHj1eLpG18LMUYbs"
+        }
+      }
+    },
+    {
+      "name": "icon-nummer",
+      "description": "Ohne eigenes Icon zählt die Icon-Nummer (0 = Standard = nicht vorhanden); Standard-AutoType allein ergibt kein misc-Feld.",
+      "entry": {
+        "uuid": "v5",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Y"
+        },
+        "iconId": 7,
+        "unknown": [
+          "<AutoType><Enabled>True</Enabled><DataTransferObfuscation>0</DataTransferObfuscation><DefaultSequence/></AutoType>"
+        ]
+      },
+      "fields": {
+        "s:Title": {
+          "canonical": "000000017300000001590000000130",
+          "fingerprint": "BEz41fZjHfSXN0Y6"
+        },
+        "icon": {
+          "canonical": "0000000469636f6e00000001690000000137",
+          "fingerprint": "Zc_KTJy7goNIUx8X"
+        },
+        "parent": {
+          "canonical": "00000006706172656e740000001853424e4a54524e2b466a47376f774856724b747565773d3d",
+          "fingerprint": "ZKWE5L8inDQMXCpy"
+        }
+      }
+    },
+    {
+      "name": "versiegelt",
+      "description": "Ownwarden.FieldTimes nach dem Versiegeln (Lösch-Marker für s:Alt; parent und s:Title ohne Angabe bekommen ihre Basiszeit).",
+      "entry": {
+        "uuid": "v6",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Password": "p",
+          "Title": "T"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000001000,
+          "s:Alt": 1700000002000
+        }
+      },
+      "fields": {
+        "s:Password": {
+          "canonical": "000000017300000001700000000131",
+          "fingerprint": "IUcJYIZi7VXeqA-J"
+        },
+        "s:Title": {
+          "canonical": "000000017300000001540000000130",
+          "fingerprint": "7oBjvRjwMXCASYQy"
+        },
+        "parent": {
+          "canonical": "00000006706172656e740000001853424e4a54524e2b466a47376f774856724b747565773d3d",
+          "fingerprint": "ZKWE5L8inDQMXCpy"
+        }
+      },
+      "fieldTimesJson": "{\"v\":1,\"w\":1700000003000,\"f\":{\"parent\":{\"t\":1700000000000,\"h\":\"ZKWE5L8inDQMXCpy\"},\"s:Alt\":{\"t\":1700000002000,\"d\":1},\"s:Password\":{\"t\":1700000001000,\"h\":\"IUcJYIZi7VXeqA-J\"},\"s:Title\":{\"t\":1700000003000,\"h\":\"7oBjvRjwMXCASYQy\"}}}"
+    }
+  ]
+}

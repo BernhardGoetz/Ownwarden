@@ -1,0 +1,97 @@
+{
+  "name": "27-beidseitig-verschoben",
+  "description": "Beide Seiten verschieben denselben Eintrag in verschiedene Gruppen. Die neuere Verschiebung (remote, Gruppe Privat) gewinnt.",
+  "local": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "privat",
+        "name": "Privat",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000002000,
+        "fields": {
+          "Title": "Konto"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "parent": 1700000002000
+        }
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "privat",
+        "name": "Privat",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "privat",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000003000,
+        "fields": {
+          "Title": "Konto"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "parent": 1700000003000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank"
+      },
+      {
+        "uuid": "privat",
+        "name": "Privat"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "privat",
+        "locationChanged": 1700000003000,
+        "fields": {
+          "Title": "Konto"
+        },
+        "fieldTimes": {
+          "parent": 1700000003000
+        }
+      }
+    ]
+  },
+  "expectedReport": {
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "parent",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

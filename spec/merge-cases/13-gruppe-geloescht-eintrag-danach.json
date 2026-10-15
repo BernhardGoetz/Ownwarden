@@ -1,0 +1,72 @@
+{
+  "name": "13-gruppe-geloescht-eintrag-danach",
+  "description": "local löscht die Gruppe Bank samt e1. remote legt NACH der Löschung den Eintrag e2 in Bank an. Eine Änderung im Inneren, die neuer ist als die Löschung, hält die Gruppe am Leben; e1 bleibt gelöscht.",
+  "local": {
+    "deleted": [
+      {
+        "uuid": "bank",
+        "time": 1700000005000
+      },
+      {
+        "uuid": "e1",
+        "time": 1700000005000
+      }
+    ]
+  },
+  "remote": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank",
+        "lastModification": 1700000000000
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e1",
+        "parent": "bank",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Giro"
+        },
+        "fieldTimes": {}
+      },
+      {
+        "uuid": "e2",
+        "parent": "bank",
+        "lastModification": 1700000006000,
+        "fields": {
+          "Title": "Neu danach"
+        },
+        "fieldTimes": {}
+      }
+    ]
+  },
+  "expected": {
+    "groups": [
+      {
+        "uuid": "bank",
+        "name": "Bank"
+      }
+    ],
+    "entries": [
+      {
+        "uuid": "e2",
+        "parent": "bank",
+        "fields": {
+          "Title": "Neu danach"
+        }
+      }
+    ],
+    "deleted": [
+      {
+        "uuid": "e1",
+        "time": 1700000005000
+      }
+    ]
+  },
+  "expectedReport": {
+    "orphansRecovered": 0,
+    "entriesDeleted": 1
+  }
+}

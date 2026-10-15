@@ -1,0 +1,126 @@
+{
+  "name": "02-gleiches-feld",
+  "description": "Beide Seiten ändern dasselbe Feld. Der neuere Zeitstempel gewinnt (remote); die ältere Fassung von local landet im Verlauf.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000002000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "lokal"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000002000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "fern"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Title": 1700000000000,
+          "s:Password": 1700000003000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000003000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "fern"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {
+          "s:Password": 1700000003000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            }
+          },
+          {
+            "lastModification": 1700000002000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "lokal"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesUpdated": 1,
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  },
+  "expectedReportSwapped": {
+    "entriesUpdated": 0,
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "s:Password",
+        "winner": "local",
+        "tieBreak": false
+      }
+    ]
+  }
+}
