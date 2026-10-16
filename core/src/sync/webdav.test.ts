@@ -100,7 +100,9 @@ describe("WebDavAdapter: Adressen", () => {
     const { adapter: a, requests } = adapter(() => new Response(null, { status: 201 }), {
       backupFolderUrl: "https://cloud.example/remote.php/webdav/Sicherung",
     });
-    await caught(a.backup({ data: bytes("x"), etag: '"1"' }, 1));
+    // PROPFIND bekommt hier 201 statt 207: Aufräumen scheitert, das ist seit 2026-10-16 nur ein Hinweis.
+    const result = await a.backup({ data: bytes("x"), etag: '"1"' }, 1);
+    expect(result.warnings).toHaveLength(1);
     expect(requests[0]!.url).toBe("https://cloud.example/remote.php/webdav/Sicherung/");
     expect(make("https://cloud.example/t.kdbx", { backupFolderUrl: "https://other.example/b/" })).toThrow(/demselben Server/);
     expect(make("https://cloud.example/t.kdbx", { backupFolderUrl: "http://cloud.example/b/" })).toThrow(/nur https/);
@@ -350,7 +352,7 @@ describe("WebDavAdapter: Sicherungskopien", () => {
     ]);
   });
 
-  it("MKCOL legt den Ordner an (201); Fehler beim Anlegen, Kopieren oder Auflisten brechen ab", async () => {
+  it("MKCOL legt den Ordner an (201); Fehler beim Anlegen oder Kopieren brechen ab", async () => {
     const created = adapter(backupServer({ mkcolStatus: 201 }));
     await created.adapter.backup({ data: bytes("alt"), etag: '"1"' }, 1);
     expect(created.requests[0]!.method).toBe("MKCOL");
@@ -358,8 +360,37 @@ describe("WebDavAdapter: Sicherungskopien", () => {
     await expect(adapter(backupServer({ mkcolStatus: 409 })).adapter.backup({ data: bytes("x"), etag: '"1"' }, 1)).rejects.toBeInstanceOf(StorageError);
     await expect(adapter(backupServer({ mkcolStatus: 401 })).adapter.backup({ data: bytes("x"), etag: '"1"' }, 1)).rejects.toBeInstanceOf(StorageAuthError);
     await expect(adapter(backupServer({ copyStatus: 507 })).adapter.backup({ data: bytes("x"), etag: '"1"' }, 1)).rejects.toThrow(/Speicherplatz/);
+  });
+
+  // Entscheidung des Eigentümers (2026-10-16): Aufräumen alter Kopien ist „best effort“.
+  // Bis dahin brach auch ein Fehler beim Auflisten ab (Teil des vorherigen Tests).
+  it("Aufräumen ist best effort: Fehler beim Auflisten oder Löschen alter Kopien werden zu Hinweisen", async () => {
     const badListing = adapter((request) => (request.method === "PROPFIND" ? new Response("<html/>", { status: 200 }) : backupServer()(request)));
-    await expect(badListing.adapter.backup({ data: bytes("x"), etag: '"1"' }, 1)).rejects.toThrow(/207/);
+    const listingResult = await badListing.adapter.backup({ data: bytes("x"), etag: '"1"' }, 1);
+    expect(badListing.requests.map((r) => r.method)).toEqual(["MKCOL", "COPY", "PROPFIND"]);
+    expect(listingResult.warnings).toHaveLength(1);
+    expect(listingResult.warnings[0]).toMatch(/nicht aufgeräumt.*207/);
+
+    const folderPath = "/remote.php/webdav/Ownwarden/ownwarden-backups/";
+    const listing = [
+      davResponse(`${folderPath}tresor.20261014-100000-000.kdbx`, "<d:resourcetype/>"),
+      davResponse(`${folderPath}tresor.20261013-100000-000.kdbx`, "<d:resourcetype/>"),
+      davResponse(`${folderPath}tresor.20261012-100000-000.kdbx`, "<d:resourcetype/>"),
+    ];
+    const locked = `https://cloud.example${folderPath}tresor.20261013-100000-000.kdbx`;
+    const { adapter: a, requests } = adapter((request) =>
+      request.method === "DELETE" && request.url === locked ? new Response(null, { status: 423 }) : backupServer({ listing })(request),
+    );
+    const result = await a.backup({ data: bytes("alt"), etag: '"1"' }, 2);
+    // Beide alten Kopien wurden versucht; die gesperrte bleibt mit Hinweis, die andere ist weg.
+    expect(requests.filter((r) => r.method === "DELETE").map((r) => r.url).sort()).toEqual([
+      `https://cloud.example${folderPath}tresor.20261012-100000-000.kdbx`,
+      locked,
+    ]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain("tresor.20261013-100000-000.kdbx");
+    expect(result.warnings[0]).toContain("423");
+    for (const warning of [...result.warnings, ...listingResult.warnings]) expect(warning).not.toContain(PASSWORD);
   });
 
   it("keep muss mindestens 1 sein", async () => {

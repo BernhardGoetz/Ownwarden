@@ -35,6 +35,13 @@ import {
 } from "../sync/http";
 import { parseMultistatus } from "../sync/multistatus";
 
+/**
+ * Hinweis für PROPFIND/DELETE-Probleme: Sie betreffen nur das Aufräumen alter Sicherungen,
+ * das seit 2026-10-16 „best effort“ ist – der Abgleich selbst bleibt sicher.
+ */
+const PRUNING_ONLY =
+  "Der Abgleich funktioniert trotzdem; alte Sicherungskopien werden dann aber nicht automatisch gelöscht (bitte gelegentlich von Hand aufräumen).";
+
 // ---------------------------------------------------------------------------
 // Ergebnis-Typen
 // ---------------------------------------------------------------------------
@@ -431,10 +438,12 @@ function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTe
           await session.request("PROPFIND", folder, { Depth: "1", "Content-Type": "application/xml; charset=utf-8" }, PROPFIND_BODY),
           "PROPFIND",
         );
-        if (response.status !== 207) return ["fail", `HTTP ${response.status} – erwartet 207`];
+        // Seit 2026-10-16 ist das Aufräumen alter Sicherungen „best effort“ (Entscheidung des
+        // Eigentümers): Ohne PROPFIND bleiben nur alte Sicherungen liegen – daher Hinweis, kein Fehler.
+        if (response.status !== 207) return ["warn", `HTTP ${response.status} – erwartet 207. ${PRUNING_ONLY}`];
         const resources = parseMultistatus(text(response.data));
         const entry = resources.find((resource) => decodeURIComponent(resource.href.replace(/\/$/, "").split("/").pop() ?? "") === "probe.kdbx");
-        if (entry === undefined) return ["fail", "Die Testdatei fehlt in der Ordnerliste."];
+        if (entry === undefined) return ["warn", `Die Testdatei fehlt in der Ordnerliste. ${PRUNING_ONLY}`];
         const etag = entry.props.get("getetag");
         const note = etag === state.etag ? "getetag stimmt mit dem ETag überein" : `getetag ${etag ?? "fehlt"} weicht vom ETag ${state.etag} ab`;
         return [etag === state.etag ? "ok" : "warn", `${resources.length} Einträge; ${note}`];
@@ -463,10 +472,14 @@ function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTe
       run: async () => {
         const target = new URL("fehlt.kdbx", folder);
         await session.request("PUT", target, putHeaders({}), sameLength("G")); // sicherstellen, dass es sie gibt
-        const response = expectHttp(await session.request("DELETE", target), "DELETE");
-        if (response.status < 200 || response.status >= 300) return ["fail", `HTTP ${response.status} – erwartet 204`];
+        const raw = await session.request("DELETE", target);
+        // 403 heißt hier „kein Löschrecht“ (z. B. Freigabe ohne Löschen) – die Anmeldung hat bei
+        // den Anfragen davor ja geklappt. Best effort wie bei PROPFIND (siehe dort): nur Hinweis.
+        if (raw.status === 403) return ["warn", `HTTP 403 (kein Löschrecht?). ${PRUNING_ONLY}`];
+        const response = expectHttp(raw, "DELETE");
+        if (response.status < 200 || response.status >= 300) return ["warn", `HTTP ${response.status} – erwartet 204. ${PRUNING_ONLY}`];
         const gone = expectHttp(await session.request("GET", target), "GET");
-        return gone.status === 404 ? ["ok", `HTTP ${response.status}, danach 404`] : ["fail", `Nach DELETE liefert GET noch HTTP ${gone.status}.`];
+        return gone.status === 404 ? ["ok", `HTTP ${response.status}, danach 404`] : ["warn", `Nach DELETE liefert GET noch HTTP ${gone.status}. ${PRUNING_ONLY}`];
       },
     },
     {
@@ -604,8 +617,12 @@ export async function main(argv: string[]): Promise<number> {
       },
     }));
   } catch (error) {
-    // Hier nennt parseArgs nur Optionsnamen, keine Werte.
-    console.error(`${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`);
+    // Eine UNBEKANNTE Option nennt parseArgs wörtlich – das kann ein versehentlich
+    // eingetipptes Passwort sein, das mit „-“ beginnt. Deshalb dann ohne den Text selbst.
+    // Die übrigen Meldungen nennen nur unsere eigenen Optionsnamen, keine Werte.
+    const unknownOption = (error as { code?: unknown }).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION";
+    const message = unknownOption ? "Unbekannte Option (wird absichtlich nicht wiederholt)." : error instanceof Error ? error.message : String(error);
+    console.error(`${message}\n\n${USAGE}`);
     return 2;
   }
   if (values.help === true) {

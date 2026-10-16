@@ -2,6 +2,11 @@ node_modules/
 vendor/
 *.log
 .DS_Store
+# Tresordateien nie versehentlich committen (z. B. aus den Beispielbefehlen der Anleitung);
+# bewusst abgelegte Referenzdateien für Tests sind erlaubt.
+*.kdbx
+!spec/**/*.kdbx
+!core/test/fixtures/**/*.kdbx
 # Testdaten, die Tests zur Laufzeit erzeugen
 core/test/.tmp/
 tools/webdav-test-server/data/

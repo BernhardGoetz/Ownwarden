@@ -14,7 +14,8 @@
  *      adoptServerSettings).
  *   5. Ist das Ergebnis inhaltlich gleich der Datei (vaultsEquivalent), nichts schreiben.
  *   6. Sonst: verschlüsseln, Sicherungskopie der Server-Fassung anlegen (scheitert sie,
- *      wird NICHT geschrieben), dann mit "If-Match: <ETag>" schreiben. Bei 412 hat ein
+ *      wird NICHT geschrieben; scheitert nur das Aufräumen ALTER Kopien, geht es weiter und
+ *      result.warnings nennt das Problem), dann mit "If-Match: <ETag>" schreiben. Bei 412 hat ein
  *      anderes Gerät dazwischen geschrieben: nächster Versuch (neu lesen, neu zusammenführen).
  *
  * Nach options.maxAttempts Versuchen ohne Erfolg: PreconditionFailedError.
@@ -57,9 +58,12 @@ type AttemptOutcome = SyncResult | "retry";
 
 export const syncVault: SyncVault = async (local, adapter, codec, options) => {
   checkOptions(options);
+  // Hinweise aus ALLEN Versuchen sammeln: Auch ein Versuch, der danach 412 bekam, hat schon
+  // gesichert und aufgeräumt (bzw. es nicht geschafft).
+  const warnings: string[] = [];
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
-    const outcome = await syncAttempt(local, adapter, codec, options, attempt);
-    if (outcome !== "retry") return outcome;
+    const outcome = await syncAttempt(local, adapter, codec, options, attempt, warnings);
+    if (outcome !== "retry") return warnings.length === 0 ? outcome : { ...outcome, warnings: [...new Set(warnings)] };
   }
   throw new PreconditionFailedError(
     `Abgleich mit ${adapter.describe()} nicht möglich: Die Datei wurde bei jedem der ${options.maxAttempts} Versuche ` +
@@ -73,6 +77,7 @@ async function syncAttempt(
   codec: VaultCodec,
   options: SyncOptions,
   attempt: number,
+  warnings: string[],
 ): Promise<AttemptOutcome> {
   const remote = await adapter.read();
   if (remote === null) return createRemote(local, adapter, codec, attempt);
@@ -90,7 +95,7 @@ async function syncAttempt(
   // Erst verschlüsseln, dann sichern: Scheitert das Verschlüsseln, entsteht keine unnötige
   // Sicherungskopie; und zwischen Sicherung und Schreiben liegt so wenig Zeit wie möglich.
   const data = await codec.encode(merged);
-  await backupOrAbort(adapter, remote, options.backupsToKeep);
+  warnings.push(...(await backupOrAbort(adapter, remote, options.backupsToKeep)));
   try {
     const written = await adapter.write(data, { ifMatch: remote.etag });
     return { vault: merged, etag: written.etag, attempts: attempt, created: false, written: true, report };
@@ -166,10 +171,16 @@ export function adoptServerSettings(local: Vault, remote: Vault): Vault {
   };
 }
 
-/** Sicherungskopie anlegen; scheitert sie, wird mit klarer Meldung abgebrochen (nichts geschrieben). */
-async function backupOrAbort(adapter: StorageAdapter, remote: RemoteFile, keep: number): Promise<void> {
+/**
+ * Sicherungskopie anlegen; scheitert sie, wird mit klarer Meldung abgebrochen (nichts
+ * geschrieben). Liefert die Hinweise des Adapters, z. B. wenn sich alte Sicherungskopien nicht
+ * löschen ließen – das Aufräumen ist „best effort“ und blockiert den Abgleich nicht
+ * (StorageAdapter.backup in contracts.ts).
+ */
+async function backupOrAbort(adapter: StorageAdapter, remote: RemoteFile, keep: number): Promise<string[]> {
   try {
-    await adapter.backup(remote, keep);
+    const result = await adapter.backup(remote, keep);
+    return result?.warnings ?? [];
   } catch (error) {
     // Abgelehnte Anmeldung unverändert weiterreichen: Die Oberfläche fragt dann nach dem Passwort.
     if (error instanceof StorageAuthError) throw error;

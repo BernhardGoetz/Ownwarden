@@ -100,8 +100,10 @@ ignoriert werden muss.
 - Nur bedingt: WebDAV `PUT` mit `If-Match` und dem ETag genau so, wie der Server ihn geliefert hat. Bei `412`: neu
   laden, zusammenführen, erneut schreiben. Die allererste Datei wird mit `If-None-Match: *` angelegt (`If-Match` auf
   eine nicht vorhandene Datei liefert ebenfalls `412`).
-- Vor jedem Schreiben ein Backup der vorherigen Fassung (Vorschlag: WebDAV `COPY` in einen Unterordner, die letzten
-  N Fassungen behalten; N im Prototyp festlegen).
+- Vor jedem Schreiben ein Backup der vorherigen Fassung per WebDAV `COPY` in `ownwarden-backups/` neben der Datei.
+  Ohne erfolgreiches Backup wird nie geschrieben. Das Aufräumen alter Backups (Standard: die letzten 20 behalten)
+  ist dagegen „best effort“: Scheitert es, läuft der Sync weiter und meldet eine Warnung (festgelegt 2026-10-16).
+- Standardwerte: höchstens 5 Versuche bei gleichzeitigem Schreiben (412), erlaubte Uhrabweichung 2 Minuten.
 
 ## Passkeys
 - Gespeichert im Attributschema von KeePassXC: `KPEX_PASSKEY_USERNAME`, `KPEX_PASSKEY_CREDENTIAL_ID`,
@@ -186,11 +188,16 @@ ignoriert werden muss.
   als geschützt markiert, leere Standardfelder werden angelegt, CR wird zu LF, Standard-`<AutoType>` wird ergänzt,
   IconID wird 0, wenn ein eigenes Icon gesetzt ist. Ownwarden wertet das nicht als Änderung.
 - `keepassxc-cli db-create` (2.7.6) schreibt KDBX 3.1 mit AES-KDF; Ownwarden liest nur KDBX 4.x.
+- `keepassxc-cli merge` übernimmt Löschungen im Standardmodus nicht und behält bei Änderungen verschiedener Felder
+  desselben Eintrags nur den neueren Eintrag als Ganzes. Ownwarden behält beide Änderungen und übernimmt Löschungen.
+- Änderungen in KeePassXC (Felder, Anhänge, Verschieben) erkennt Ownwarden feldgenau als externe Änderung.
+- Eine von KeePassXC gespeicherte Datei kommt durch Ownwarden (lesen + schreiben) inhaltlich unverändert heraus.
 
 ## Aktuelle Phase
 Phase 0 – Prototyp des TypeScript-Kerns, gebaut in Etappen (jede mit kritischer Prüfung):
-1. KDBX4-Container ✅  2. XML-Modell ✅  3. Feld-Merge ✅  4. WebDAV-Sync ⏳  5. Zusammenführen, CLI, Anleitung ⬜
-Nur für Testdaten gedacht.
+1. KDBX4-Container ✅  2. XML-Modell ✅  3. Feld-Merge ✅  4. WebDAV-Sync ✅  5. Zusammenführen, CLI, Anleitung ✅
+Stand 2026-10-16: 959 Tests grün (gegen KeePassXC 2.7.6 und einen SabreDAV-Testserver). Nur für Testdaten gedacht.
+Nächster Schritt: Prüfskript (`core/README.md`) gegen echte MagentaCLOUD und Nextcloud mit einem Test-Zugang.
 
 ## Repo-Struktur
 - `core/` – TypeScript-Kern (KDBX4, Feld-Merge, WebDAV-Sync), später von der Erweiterung genutzt

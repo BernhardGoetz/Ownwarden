@@ -204,6 +204,12 @@ export interface RemoteFile {
 
 export type WriteCondition = { ifMatch: string } | { ifNoneMatch: "*" };
 
+/** Ergebnis von StorageAdapter.backup (Ergänzung vom 2026-10-16, siehe dort). */
+export interface BackupResult {
+  /** Hinweise, die den Abgleich NICHT aufhalten (deutsch, ohne Zugangsdaten). Leer: keine. */
+  warnings: string[];
+}
+
 export interface StorageAdapter {
   /** Für Meldungen, ohne Zugangsdaten. */
   describe(): string;
@@ -211,8 +217,15 @@ export interface StorageAdapter {
   read(): Promise<RemoteFile | null>;
   /** Wirft PreconditionFailedError bei 412. Liefert den neuen ETag, falls der Server ihn nennt. */
   write(data: Uint8Array, condition: WriteCondition): Promise<{ etag: string | null; serverDate?: Millis }>;
-  /** Legt eine Sicherungskopie der aktuellen Fassung an und behält nur die neuesten `keep`. */
-  backup(current: RemoteFile, keep: number): Promise<void>;
+  /**
+   * Legt eine Sicherungskopie der aktuellen Fassung an und behält nur die neuesten `keep`.
+   *
+   * Das Anlegen ist Pflicht: Scheitert es, wirft backup (syncVault schreibt dann nicht).
+   * Das Aufräumen alter Kopien ist „best effort“ (Entscheidung des Eigentümers, 2026-10-16):
+   * Lässt sich eine alte Kopie nicht auflisten oder löschen (z. B. 403/423), wirft backup
+   * NICHT, sondern meldet es in `warnings`. Rückgabe `void` (ältere Adapter) heißt: keine Hinweise.
+   */
+  backup(current: RemoteFile, keep: number): Promise<BackupResult | void>;
 }
 
 /** Wandelt Datei-Bytes und Modell ineinander um (schließt die Zugangsdaten ein). */
@@ -241,6 +254,12 @@ export interface SyncResult {
   /** true, wenn geschrieben wurde. */
   written: boolean;
   report?: MergeReport;
+  /**
+   * Hinweise, die den Abgleich nicht verhindert haben, z. B. „alte Sicherungskopie ließ sich
+   * nicht löschen“ (siehe StorageAdapter.backup). Fehlt, wenn es keine gibt. Optional, damit
+   * bestehende Aufrufer und Tests unverändert gültig bleiben (Ergänzung vom 2026-10-16).
+   */
+  warnings?: string[];
 }
 
 /** sync/sync.ts */

@@ -10,7 +10,8 @@
  *     (neu anlegen). Hat ein anderes Gerät inzwischen geschrieben, antwortet der Server mit
  *     412 – dann muss syncVault neu lesen und zusammenführen.
  *   - Vor dem Überschreiben eine Sicherungskopie im Sicherungsordner (COPY, sonst PUT der
- *     gelesenen Bytes); alte Kopien dieser Datei werden aufgeräumt.
+ *     gelesenen Bytes); alte Kopien dieser Datei werden aufgeräumt (best effort: scheitert
+ *     das Aufräumen, gibt es nur einen Hinweis, siehe pruneBackups).
  *
  * Sicherheit:
  *   - Nur https://, außer http:// auf den eigenen Rechner (Testserver), siehe parseStorageUrl.
@@ -25,7 +26,15 @@
  *
  * Läuft auch im Service Worker der Browser-Erweiterung (nur fetch & Co.).
  */
-import { PreconditionFailedError, StorageAuthError, StorageError, type RemoteFile, type StorageAdapter, type WriteCondition } from "../contracts";
+import {
+  PreconditionFailedError,
+  StorageAuthError,
+  StorageError,
+  type BackupResult,
+  type RemoteFile,
+  type StorageAdapter,
+  type WriteCondition,
+} from "../contracts";
 import type { Millis } from "../model";
 import { backupFileName, backupsToDelete } from "./backup-names";
 import {
@@ -210,11 +219,15 @@ export class WebDavAdapter implements StorageAdapter {
   // Sicherungskopien
   // -------------------------------------------------------------------------
 
-  async backup(current: RemoteFile, keep: number): Promise<void> {
+  /**
+   * Sicherungskopie anlegen (Pflicht: Fehler werden geworfen), danach alte Kopien aufräumen
+   * („best effort“: Fehler werden zu Hinweisen, siehe StorageAdapter.backup und pruneBackups).
+   */
+  async backup(current: RemoteFile, keep: number): Promise<BackupResult> {
     if (!Number.isInteger(keep) || keep < 1) throw new RangeError("backup: keep muss eine ganze Zahl ≥ 1 sein.");
     await this.ensureBackupFolder();
     const createdName = await this.storeBackup(current);
-    await this.pruneBackups(keep, createdName);
+    return { warnings: await this.pruneBackups(keep, createdName) };
   }
 
   private async ensureBackupFolder(): Promise<void> {
@@ -274,11 +287,23 @@ export class WebDavAdapter implements StorageAdapter {
    * Ausnahme könnte das Aufräumen genau die Sicherung der Fassung löschen, die syncVault gleich
    * überschreibt – dann gäbe es von ihr keine Sicherung mehr. Behalten werden deshalb die
    * eigene neue Sicherung plus die neuesten `keep - 1` übrigen.
+   *
+   * Aufräumen ist „best effort“ (Entscheidung des Eigentümers, 2026-10-16): Die wichtige
+   * Sicherung ist in diesem Moment schon angelegt. Lässt sich der Ordner nicht auflisten oder
+   * eine ALTE Kopie nicht löschen (z. B. 403 bei einer Freigabe ohne Löschrecht, 423 bei einer
+   * gesperrten Datei), soll das den Abgleich nicht dauerhaft blockieren. Statt zu werfen,
+   * liefert die Funktion Hinweise; die übrigen alten Kopien werden trotzdem gelöscht.
+   * Folge: Im Sicherungsordner können dann mehr als `keep` Kopien liegen.
    */
-  private async pruneBackups(keep: number, createdName: string): Promise<void> {
-    const resources = await this.propfind(this.backupFolderUrl, "1");
+  private async pruneBackups(keep: number, createdName: string): Promise<string[]> {
+    let resources: DavResource[] | null;
+    try {
+      resources = await this.propfind(this.backupFolderUrl, "1");
+    } catch (error) {
+      return [`Alte Sicherungskopien wurden nicht aufgeräumt: Der Sicherungsordner ließ sich nicht auflisten (${errorText(error)}).`];
+    }
     if (resources === null) {
-      throw new StorageError(`Sicherungsordner ${describeUrl(this.backupFolderUrl)} nicht gefunden (HTTP 404).`, 404);
+      return [`Alte Sicherungskopien wurden nicht aufgeräumt: Sicherungsordner ${describeUrl(this.backupFolderUrl)} nicht gefunden (HTTP 404).`];
     }
     const children = new Map<string, URL>();
     for (const resource of resources) {
@@ -287,13 +312,19 @@ export class WebDavAdapter implements StorageAdapter {
       if (url !== null) children.set(decodeSegment(lastSegment(url.pathname)), url);
     }
     const others = [...children.keys()].filter((name) => name !== createdName);
+    const warnings: string[] = [];
     for (const name of backupsToDelete(this.fileName, others, keep - 1)) {
       const url = children.get(name)!;
-      const response = await this.send("DELETE", url);
-      await discardBody(response);
-      // 404: schon weg (z. B. hat ein anderes Gerät gleichzeitig aufgeräumt).
-      if (response.status !== 404) await this.expectSuccess(response, "Löschen einer alten Sicherungskopie", url);
+      try {
+        const response = await this.send("DELETE", url);
+        await discardBody(response);
+        // 404: schon weg (z. B. hat ein anderes Gerät gleichzeitig aufgeräumt).
+        if (response.status !== 404) await this.expectSuccess(response, "Löschen einer alten Sicherungskopie", url);
+      } catch (error) {
+        warnings.push(`Alte Sicherungskopie "${name}" ließ sich nicht löschen (${errorText(error)}). Bitte bei Gelegenheit im Sicherungsordner aufräumen.`);
+      }
     }
+    return warnings;
   }
 
   /**
@@ -396,6 +427,11 @@ export class WebDavAdapter implements StorageAdapter {
 // ---------------------------------------------------------------------------
 // Hilfsfunktionen
 // ---------------------------------------------------------------------------
+
+/** Meldungstext eines Fehlers (die Meldungen dieses Adapters enthalten nie Zugangsdaten). */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function remoteFile(data: Uint8Array, etag: string, response: Response): RemoteFile {
   const serverDate = parseHttpDate(response.headers.get("Date"));
