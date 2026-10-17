@@ -1,0 +1,49 @@
+{
+  "name": "34-papierkorb-gleiche-sekunde",
+  "description": "Beide Seiten haben in derselben Sekunde einen anderen Papierkorb gewählt (RecycleBinChanged gleich in ganzen Sekunden). Gleichstand-Regel: größeres encodeParts([an ? \"1\" : \"0\", RecycleBinUUID]), die UUID als Base64-TEXT wie in der XML (spec/README.md, Abschnitt 5.5). \"QUFB…\" (Bytes 0x41…) ist als Text größer als \"////…\" (Bytes 0xFF…) und gewinnt – wer die UUID-Bytes vergliche, wählte den anderen. Dass local die spätere Millisekunde hat, zählt nicht.",
+  "local": {
+    "recycleBin": "b64://///////////////////w==",
+    "recycleBinChanged": 1700000005900,
+    "groups": [
+      {
+        "uuid": "b64:QUFBQUFBQUFBQUFBQUFBQQ==",
+        "name": "Papierkorb Q",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "b64://///////////////////w==",
+        "name": "Papierkorb S",
+        "lastModification": 1700000000000
+      }
+    ]
+  },
+  "remote": {
+    "recycleBin": "b64:QUFBQUFBQUFBQUFBQUFBQQ==",
+    "recycleBinChanged": 1700000005000,
+    "groups": [
+      {
+        "uuid": "b64:QUFBQUFBQUFBQUFBQUFBQQ==",
+        "name": "Papierkorb Q",
+        "lastModification": 1700000000000
+      },
+      {
+        "uuid": "b64://///////////////////w==",
+        "name": "Papierkorb S",
+        "lastModification": 1700000000000
+      }
+    ]
+  },
+  "expected": {
+    "recycleBin": "b64:QUFBQUFBQUFBQUFBQUFBQQ==",
+    "groups": [
+      {
+        "uuid": "b64:QUFBQUFBQUFBQUFBQUFBQQ==",
+        "name": "Papierkorb Q"
+      },
+      {
+        "uuid": "b64://///////////////////w==",
+        "name": "Papierkorb S"
+      }
+    ]
+  }
+}

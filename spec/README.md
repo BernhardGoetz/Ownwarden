@@ -20,6 +20,12 @@ Alle Zeiten sind Millisekunden seit 1970-01-01 UTC. KDBX speichert Zeiten nur in
 Sekunden – aus einer Datei gelesene Zeiten sind also Vielfache von 1000. Feld-Zeitstempel
 in `Ownwarden.FieldTimes` sind millisekundengenau.
 
+Zeiten, die diese Regeln aus einer anderen Zeit **ableiten** (`t + 1`, „nächste ganze
+Sekunde“ = `(floor(t/1000) + 1) · 1000`, die monotone Uhr in Abschnitt 6), sind höchstens
+**253402300799000** (Ende des KDBX-Zeitbereichs, Abschnitt 3): Dort bleiben sie stehen. Eine
+spätere Zeit ließe sich nicht speichern, und in `Ownwarden.FieldTimes` machte sie die ganzen
+FieldTimes des Eintrags ungültig. `t + 1` bedeutet also immer `min(t + 1, 253402300799000)`.
+
 ---
 
 ## 1. Felder
@@ -162,14 +168,27 @@ verwirft sie). Verlaufseinträge haben keine FieldTimes.
 gültiges `t` hat oder weder `"d":1` noch ein Text-`h`. **Gültige Zeit** = ganze Zahl im
 KDBX-Zeitbereich (Jahr 1 bis 9999): −62135596800000 ≤ t ≤ 253402300799000. (Eine unsinnige
 Zeit wie „Jahr 33658“ gewönne sonst jeden Vergleich, und das Ergebnis ließe sich nicht mehr
-speichern.) Feldschlüssel, die das Feld-Modell
-nicht kennt (z. B. `s:KPEX_PASSKEY_…`, `cd:_LAST_MODIFIED`, `s:` ohne Namen), werden
-übersprungen.
+speichern.) Die Prüfung gilt für jeden Feld-Eintrag in `f`. Danach übersprungen (ohne
+Wirkung) werden genau die Feldschlüssel, die keine Felder sind:
+
+- Schlüssel, deren Art das Feld-Modell nicht kennt – alles außer `s:…`, `a:…`, `cd:…`,
+  `passkey`, `parent`, `tags`, `icon`, `colors`, `overrideUrl`, `expiry`, `misc`
+  (z. B. `x:A`, `Title`);
+- `s:` mit einem Passkey-Attribut als Namen (`s:KPEX_PASSKEY_…`, `s:KPXC_PASSKEY_…`; sie
+  gehören zu `passkey`);
+- `cd:Ownwarden.FieldTimes` und `cd:_LAST_MODIFIED`.
+
+`s:`, `a:` und `cd:` mit **leerem** Namen sind gewöhnliche Schlüssel: Ein Feld, ein Anhang
+oder ein CustomData-Eintrag mit leerem Namen kann in einer Datei vorkommen und ist dann ein
+ganz normales Feld.
 
 **Versiegeln** (nach jeder Änderung durch Ownwarden und nach jedem Zusammenführen): für
 jedes vorhandene Feld `{"t", "h"}` mit frischem Fingerabdruck, für jedes bekannte entfernte
 Feld `{"t", "d":1}`; `w` = `times.lastModification`. Lösch-Marker werden nie gelöscht
-(sonst brächte ein Gerät, das lange offline war, das Feld zurück).
+(sonst brächte ein Gerät, das lange offline war, das Feld zurück). Jedes geschriebene `t` und
+`w` muss eine gültige Zeit sein; sonst ist das ein Programmfehler und es wird nicht versiegelt
+(die Referenz wirft einen Fehler) – FieldTimes, die beim nächsten Lesen ungültig wären,
+nähmen dem Eintrag still alle Lösch-Marker.
 
 ## 4. Wirksame Feld-Zeitstempel
 
@@ -208,11 +227,17 @@ auf ganze Sekunden abgerundet.
 So überschreibt z. B. eine Benutzernamen-Änderung in KeePassXC nicht das Passwort, das
 Ownwarden auf einem anderen Gerät (früher) geändert hat (Testfall 14).
 
+Haben **beide** Seiten eines Zusammenführens keine gültigen FieldTimes, kommen beim
+Zusammenführen noch Lösch-Marker der neueren Seite hinzu (Abschnitt 5.1).
+
 ## 5. Zusammenführen (`mergeVaults(local, remote, now)`)
 
 Reine Funktion: Die Eingaben werden nicht verändert. Inhaltlich hängt das Ergebnis nicht
 davon ab, welche Seite local ist (nur die Reihenfolge von Geschwistern, die von local
-übernommenen Meta-Angaben und das Feld `winner` im Bericht).
+übernommenen Meta-Angaben und KDBX-Einstellungen (5.5) und das Feld `winner` im Bericht).
+Voraussetzung: keine doppelten UUIDs innerhalb einer Seite (5.2). Ein Client gleicht nicht
+mit `mergeVaults(local, server)` ab, sondern übernimmt vorher die Einstellungen der
+Server-Datei (5.7).
 
 ### 5.1 Einträge
 
@@ -230,6 +255,18 @@ verschiedenen Gruppen liegen).
   4. dann der größere exakte Wert;
   sind alle gleich, sind die Fassungen gleich (local wird genommen).
 
+  **Beide Seiten ohne gültige FieldTimes** (Abschnitt 4, z. B. in KeePassXC angelegt und von
+  Ownwarden nie geändert) mit verschiedener `lastModification` **in ganzen Sekunden**: Die
+  neuere Seite ist maßgeblich dafür, welche Felder **fehlen**. Für jedes Feld, das auf der
+  älteren Seite vorhanden ist und auf der neueren nicht, bekommt die neuere Seite VOR der
+  Entscheidung oben einen Lösch-Marker zu ihrer Basiszeit (`floor(lastModification/1000)·1000`)
+  – auch wenn ihr Verlauf einen früheren Lösch-Marker ergab. Die ältere Seite kann das Feld
+  nicht über Ownwarden angelegt haben (dann wäre sie versiegelt); ohne diese Regel hätte ein
+  Feld, das in KeePassXC ohne Verlaufseintrag entfernt wurde (HistoryMaxItems = 0, Verlauf
+  über HistoryMaxSize oder gelöscht), auf der neueren Seite gar keine Zeit, und jede ältere
+  Kopie brächte es zurück (Testfall 32). Ein solcher Marker zählt im Bericht als „kennt das
+  Feld“. In derselben Sekunde gibt es keine maßgebliche Seite.
+
   Der Gewinner liefert den Rohwert (oder das Fehlen) des Felds, `parent` die Gruppe.
   Fehlende Standardfelder werden leer angelegt (Password geschützt), wie bei KeePass.
 
@@ -246,12 +283,46 @@ verschiedenen Gruppen liegen).
   Inhalt **ohne** die `cd:`-Felder – KeePassXC übernimmt CustomData nicht in seine
   Verlaufseinträge, dieselbe Fassung kann also einmal mit und einmal ohne ankommen; und
   dieselbe Fassung kommt oft einmal aus dem Speicher (ms) und einmal aus der Datei (s)) nur
-  einmal. Behalten wird die mit dem größeren Rohdaten-Fingerabdruck **über die auf ganze
-  Sekunden abgerundeten Zeiten** (auch Ablaufzeit und `LastModificationTime` von
-  CustomData), bei Gleichheit die mit dem größeren Rohdaten-Fingerabdruck über die genauen
-  Zeiten. Rohdaten-Fingerabdruck = Fingerabdruck wie in Abschnitt 3 über
+  einmal. Welche bleibt, ist eine **feste Reihenfolge über alle Rohdaten** – unabhängig von der
+  Rolle der Seiten und davon, ob eine Fassung aus dem Speicher (ms) oder aus der Datei (s)
+  kommt. Sonst behielte jedes Gerät seine eigene Fassung und lüde sie bei jedem Abgleich
+  wieder hoch (Testfall 33). Behalten wird die größere nach
+  1. dem Rohdaten-Fingerabdruck **über die auf ganze Sekunden abgerundeten Zeiten** (auch
+     Ablaufzeit und `LastModificationTime` von CustomData), als Text verglichen;
+  2. dann der vollständigen Kodierung über die abgerundeten Zeiten;
+  3. dann der vollständigen Kodierung über die genauen Zeiten.
+
+  Erst alles, was nach Speichern und Laden noch zu sehen ist (ganze Sekunden), dann die
+  Millisekunden: Sonst entschiede ein Gerät, das die Fassung im Speicher hat, anders als eines
+  mit derselben Fassung aus der Datei.
+
+  Rohdaten-Fingerabdruck = Fingerabdruck wie in Abschnitt 3 über
   `encodeParts([key1, exakt1, key2, exakt2, …, creation, lastModification, lastAccess, expiry, usageCount, locationChanged, expires])`
-  mit allen vorhandenen Feldern nach Schlüssel sortiert; als Text verglichen. Sortiert nach
+  mit allen **vorhandenen** Feldern nach Schlüssel sortiert. Er sieht nicht alles – z. B. nicht
+  das Standard-`<AutoType>` (es macht `misc` nicht vorhanden), das KeePassXC 2.7.6 beim
+  Speichern auch in jeden Verlaufseintrag schreibt. Deshalb danach die **vollständige
+  Kodierung** aller Rohdaten der Fassung (Bytes, verglichen wie in 2.1):
+
+  ```
+  encodeParts([
+    uuid, iconId, customIconUuid oder "", Vordergrundfarbe, Hintergrundfarbe, OverrideURL,
+    [Tag1, Tag2, …],                       Tags roh, in ihrer Reihenfolge
+    [creation, lastModification, lastAccess, expiry, usageCount, locationChanged, expires],
+    [Name1, Wert1, p1, Name2, …],          ALLE <String>-Felder roh (auch leere Standardfelder
+                                           und Passkey-Attribute), nach Namen sortiert
+    [Name1, Bytes1, p1, Name2, …],         alle Anhänge, in ihrer Reihenfolge
+    [Schlüssel1, Wert1, lastModified1 oder "", …]
+                                           ALLE CustomData-Einträge (auch Ownwarden.FieldTimes
+                                           und _LAST_MODIFIED), nach Schlüssel sortiert
+    QualityCheck ("u" = fehlt, "1", "0"), previousParentGroup oder "",
+    [Element1, Element2, …]                alle unbekannten Elemente roh, in ihrer Reihenfolge
+  ])
+  ```
+
+  Zahlen als Dezimaltext, `expires` und `p` als `"1"`/`"0"`, `[…]` = verschachtelte Liste (ein
+  Teil). Der eigene Verlauf einer Fassung zählt nicht (im Verlauf fällt er weg). Sind alle drei
+  Werte gleich, unterscheiden sich die Fassungen höchstens in der Reihenfolge ihrer Felder oder
+  ihres CustomData – das zählt nirgends; behalten wird dann eine beliebige. Sortiert nach
   `lastModification` in ganzen Sekunden, dann dem Inhalts-Fingerabdruck ohne `cd:` (danach
   eindeutig). Gekürzt nach
   den Grenzen von **local**: erst `HistoryMaxItems` (die neuesten bleiben), dann
@@ -264,13 +335,50 @@ verschiedenen Gruppen liegen).
   und dessen Inhalt (vorhanden? + kanonischer Wert) sich unterscheidet; `tieBreak` = gleiche
   Zeitstempel.
 
-### 5.2 Doppelte UUIDs in einer Datei
+### 5.2 Doppelte UUIDs
 
-Kommt eine Eintrags- oder Gruppen-UUID in EINER Datei mehrfach vor (der XML-Leser erkennt das
-nicht), werden die Vorkommen vorher wie zwei Seiten zusammengeführt (das erste Vorkommen
-als local). Eine Untergruppe mit der UUID der Wurzel wird Teil der Wurzel.
-Haben beide Seiten verschiedene Wurzel-UUIDs, gelten beide Wurzeln als dieselbe Gruppe; ihre
-UUID im Ergebnis ist die kleinere.
+**Voraussetzung für `mergeVaults`:** Innerhalb EINER Seite sind die UUIDs aller Gruppen (mit
+Wurzel) und aller Einträge (ohne Verlaufseinträge) verschieden – Gruppen und Einträge teilen
+sich einen Namensraum. Sonst ist das ein Programmfehler, und `mergeVaults` bricht mit einem
+Fehler ab (die Referenz wirft), statt die Vorkommen still zu einem Objekt zusammenzulegen –
+dabei ginge eines samt Passwort verloren. Dass die Voraussetzung gilt, stellt der KDBX-Leser
+sicher:
+
+**Leseregel (verbindlich für jede Implementierung):** Kommen in einer Datei UUIDs von Gruppen
+oder Einträgen mehrfach vor (in der KeePass-Welt gibt es solche Dateien; KeePass 2.x bietet
+dafür eigens „doppelte UUIDs reparieren“ an), bekommt beim Lesen jedes SPÄTERE Vorkommen eine
+neue UUID. Sie wird aus der alten **abgeleitet**, nicht gewürfelt: Jedes Gerät, das dieselbe
+Datei liest, kommt auf dieselbe neue UUID und sieht beim Abgleich dasselbe Objekt; beim
+nächsten Speichern steht sie in der Datei, danach ist die Datei repariert. Referenz:
+`core/src/kdbx/duplicate-uuids.ts`.
+
+1. **Vergeben** sind alle UUIDs der Datei: jede `<UUID>` einer Gruppe, eines Eintrags und
+   eines Verlaufseintrags, jede UUID in `<DeletedObjects>`, dazu die Null-UUID
+   (`AAAAAAAAAAAAAAAAAAAAAA==`).
+2. Gruppen und Einträge (OHNE Verlaufseinträge) werden in **Dokumentreihenfolge** durchlaufen:
+   Reihenfolge der öffnenden Tags `<Group>`/`<Entry>`; eine Gruppe kommt also vor ihrem
+   Inhalt, die Wurzelgruppe zuerst. Gruppen und Einträge teilen sich EINEN Namensraum (wie
+   bei KeePass; auch Lösch-Vermerke unterscheiden nicht zwischen Gruppe und Eintrag).
+3. Das erste Vorkommen einer UUID behält sie. Für jedes weitere Vorkommen der UUID `u`:
+   `k` = Zähler für `u` (beginnt bei 0). Wiederhole `k := k + 1`,
+   `Kandidat` = erste 16 Byte von SHA-256( UTF-8(`"Ownwarden-Duplicate"`) ‖ die 16 Byte von
+   `u` ‖ `k` als uint32 **Little Endian** ), solange der Kandidat schon vergeben ist. Der
+   Kandidat wird die neue UUID und gilt ab dann als vergeben; der Zähler von `u` bleibt für
+   das nächste Vorkommen von `u` stehen.
+4. Die Verlaufseinträge eines umbenannten Eintrags bekommen dieselbe neue UUID (sie gehören zu
+   ihm). Verlaufseinträge zählen selbst NIE als Vorkommen – sie tragen rechtmäßig die UUID
+   ihres Eintrags.
+
+Verweise auf die alte UUID (RecycleBinUUID, PreviousParentGroup, `{REF:…}`) werden nicht
+umgeschrieben; sie meinen weiterhin das erste Vorkommen. Beispiel: `u` =
+`l8ruJYQAj5WS5uV32csPAQ==` (Name `"doppelt"` nach 7.1) → zweites Vorkommen
+`v34trW/2XP1goJfcx5kIJg==` (`k` = 1), drittes `5PpYLyDtzicRvVNYd2ZAug==` (`k` = 2), sofern
+nicht schon vergeben.
+
+**Verschiedene Wurzeln:** Haben beide Seiten verschiedene Wurzel-UUIDs, gelten beide Wurzeln
+als dieselbe Gruppe; ihre UUID im Ergebnis ist die kleinere (Base64-Text, UTF-8-Bytes). Eine
+Untergruppe der einen Seite mit dieser UUID (der Wurzel-UUID der anderen Seite) wird Teil der
+Wurzel.
 
 ### 5.3 Löschen gegen Ändern
 
@@ -299,15 +407,15 @@ zurück. Zwei Entscheidungen:
   der Elemente (roh); Ablauf = `floor(expiry/1000)` falls Expires, sonst `""`.
   exakt = `encodeParts(["group", name, notizen, [iconId, uuid oder ""], tags roh, [key, wert, lastModified oder "", …], unbekannte, previousParentGroup oder "", [expires, expiry]])`.
 - **Elterngruppe**: größere `times.locationChanged` (ganze Sekunden) gewinnt; Gleichstand:
-  größere Eltern-UUID (Text). Die Wurzel hat keine.
+  größere Eltern-UUID (Base64-Text, UTF-8-Bytes). Die Wurzel hat keine.
 
 Zeiten: `creation` min, `lastModification`/`lastAccess`/`usageCount` max, `locationChanged`
 vom Gewinner der Elterngruppe (haben beide Seiten dieselbe Elterngruppe: das Maximum), Ablauf vom
 Gewinner der Eigenschaften.
 
 **Zyklen** (local schiebt A unter B, remote B unter A): In jedem Kreis kommt die Gruppe mit
-der kleinsten `locationChanged` (ganze Sekunden; Gleichstand: kleinere UUID) direkt unter die
-Wurzel.
+der kleinsten `locationChanged` (ganze Sekunden; Gleichstand: kleinere UUID als Base64-Text)
+direkt unter die Wurzel.
 
 **Gelöschte Gruppe** (Lösch-Vermerk `D`): Sie bleibt, wenn ihre eigene Änderung
 (max(`lastModification`, `locationChanged`)) oder die Änderung irgendeines **bestehen
@@ -331,17 +439,22 @@ So trifft ein späterer Abgleich mit einer der Eingaben dieselbe Entscheidung.
 - **Lösch-Vermerke** im Ergebnis: alle vereinigten außer denen, deren UUID im Ergebnis
   vorhanden ist (Eintrag, Gruppe, behaltenes Icon). Vermerke für unbekannte UUIDs bleiben.
 - **Meta** (alle Zeiten in **ganzen Sekunden** verglichen, wie bei Gruppen): Datenbankname
-  nach `DatabaseNameChanged`, Papierkorb (an/aus + UUID) nach `RecycleBinChanged`
-  (Gleichstand jeweils: größerer Wert; bei gleichem Wert auf beiden Seiten bekommt das Ergebnis
-  die spätere der beiden Zeiten). Eigene Icons: Vereinigung nach UUID, bei beiden Seiten
-  gewinnt die neuere `LastModificationTime` (fehlend = −∞; Gleichstand: größeres
+  nach `DatabaseNameChanged` (Gleichstand: der größere Name, UTF-8-Bytes), Papierkorb (an/aus
+  + UUID als Einheit) nach `RecycleBinChanged` (Gleichstand: das größere
+  `encodeParts([an ? "1" : "0", RecycleBinUUID])`, die UUID als Base64-**Text** wie in der XML –
+  auch bei ausgeschaltetem Papierkorb –, Bytes verglichen wie in 2.1; also zuerst an vor aus,
+  dann die UUID als Text, nicht ihre 16 Byte – Testfall 34). Bei gleichem Wert auf beiden
+  Seiten bekommt das Ergebnis jeweils die spätere der beiden Zeiten. Eigene Icons:
+  Vereinigung nach UUID, bei beiden Seiten gewinnt die neuere `LastModificationTime` (fehlend = −∞; Gleichstand: größeres
   `encodeParts([daten, name oder "", lastModified oder ""])`); ein Icon mit neuerem
   Lösch-Vermerk fällt weg, außer ein Eintrag (auch im Verlauf) oder eine Gruppe benutzt es.
   CustomData: Vereinigung, bei gleichem Schlüssel gewinnt die neuere `LastModificationTime`
   (fehlend = −∞), bei Gleichstand – in KDBX 4.0 der Normalfall – das größere
   `encodeParts([wert, lastModified oder ""])` (nicht local: sonst behielte jedes Gerät seinen
   Wert und schriebe ihn immer wieder zurück). Verlaufsgrenzen, unbekannte Elemente und
-  KDBX-Einstellungen von local (KDBX-Nebenversion = Maximum). Generator `Ownwarden`.
+  KDBX-Einstellungen von local (KDBX-Nebenversion = Maximum), unbekannte Elemente von
+  `<Root>` ebenfalls von local – beim Abgleich setzt der Client hier vorher die Werte der
+  Server-Datei ein (5.7). Generator `Ownwarden`.
 - **Reihenfolge der Geschwister:** zuerst wie in local, dann die übrigen wie in remote, dann
   der Rest (z. B. Waisen) nach Position in local, dann in remote, dann UUID.
 
@@ -358,6 +471,26 @@ So trifft ein späterer Abgleich mit einer der Eingaben dieselbe Entscheidung.
 | `fieldConflicts`         | siehe 5.1                                                              |
 | `externalEdits`          | Einträge (beider Seiten), die laut FieldTimes extern geändert wurden   |
 
+### 5.7 Abgleich mit dem Server: Einstellungen der Server-Datei gewinnen
+
+Ein Client führt beim Abgleich nicht `mergeVaults(local, server)` aus, sondern
+`mergeVaults(local′, server)`. `local′` ist `local`, in das vorher aus der Server-Datei
+übernommen wurde:
+
+- die KDBX-Einstellungen (`settings`: Verschlüsselung, Kompression, Schlüsselableitung samt
+  Parametern, KDBX-Nebenversion, öffentliches CustomData des Headers),
+- `HistoryMaxItems` und `HistoryMaxSize`,
+- die unbekannten Meta-Elemente (`meta.unknown`, z. B. `<MemoryProtection>`,
+  `<DatabaseDescription>`),
+- die unbekannten Elemente von `<Root>` (`rootUnknown`).
+
+Alles andere bleibt von `local`. Referenz: `adoptServerSettings` in `core/src/sync/sync.ts`.
+Grund (PROJECT-CONTEXT, entschieden 2026-10-15): Für diese Angaben ohne Zeitstempel gewinnt die
+Fassung der Server-Datei. `mergeVaults` selbst nimmt sie von local (5.5); ohne diesen Schritt
+schriebe ein Gerät mit älterer Fassung im Speicher z. B. eine in KeePassXC verstärkte
+Schlüsselableitung oder geänderte Verlaufsgrenzen zurück und kürzte den Verlauf nach seinen
+alten Grenzen.
+
 ## 6. Bearbeiten
 
 Ownwarden ändert eine Datenbank nur über `core/src/merge/vault-ops.ts`: wirksame
@@ -372,7 +505,27 @@ Passkeys nur als Ganzes. Tags mit `,` oder `;` sind verboten (KeePass trennt dar
 „Jetzt“ liefert eine monotone Uhr: nie kleiner als der größte Zeitstempel der Datenbank
 (Änderungs-, Verschiebe-, Lösch-, Feld- und Meta-Zeiten; nicht Ablauf, Zugriff, Erstellung)
 + 1 ms und nie kleiner als der letzte gelieferte Wert + 1 ms. Zeiten außerhalb des
-KDBX-Bereichs (siehe Abschnitt 3) zählen dabei nicht.
+KDBX-Bereichs (siehe Abschnitt 3) zählen dabei nicht. Die Uhr liefert nie mehr als
+253402300799000: Am Ende des KDBX-Bereichs bleibt sie stehen (dann entscheidet bei gleicher
+Zeit die Gleichstand-Regel).
+
+**Zeichen, die KDBX nicht speichern kann, werden abgelehnt** (Fehler, in der Referenz ein
+`RangeError` mit deutscher Meldung, die den Wert nicht nennt) – nie still entfernt oder
+ersetzt. Sonst verlöre der Nutzer unbemerkt Daten, und das Modell im Speicher wiche von der
+Datei ab: Jeder Abgleich schriebe erneut (mit Sicherungskopie). Abgelehnt werden
+
+- in **ungeschütztem Text** – Werte ungeschützter Felder (auch Passkey-Attribute), Namen von
+  Feldern und Anhängen, Tags, CustomData-Schlüssel und -Werte, Gruppennamen, Farben,
+  OverrideURL – die in XML 1.0 verbotenen Zeichen U+0000–U+0008, U+000B, U+000C,
+  U+000E–U+001F, U+FFFE, U+FFFF und einzelne (ungepaarte) UTF-16-Surrogate. Genau diese
+  entfernt der KDBX-Writer (`core/src/kdbx/xml-dom.ts`, `stripInvalidXmlChars`); KeePassXC
+  liest sie nicht einmal als `&#n;`.
+- in **geschützten Werten** nur einzelne UTF-16-Surrogate: Diese Werte stehen verschlüsselt in
+  der Datei, aber UTF-8 kennt keine einzelnen Surrogate (sie würden zu U+FFFD). Tab, LF, CR
+  und andere Steuerzeichen bleiben dort erhalten.
+
+Geprüft wird nur, was eine Änderung neu setzt (geänderte Felder, neue Namen); Werte, die
+schon so in der Datenbank stehen, sperren keine anderen Änderungen.
 
 ---
 
@@ -494,7 +647,9 @@ Gleiches Format wie eine Datenbank. Verglichen wird:
   `fieldTimes` = **wirksame** Feld-Zeitstempel (Abschnitt 4) der genannten Schlüssel – ist
   das Feld in der Erwartung nicht vorhanden, ist ein Lösch-Marker mit dieser Zeit gemeint;
   das Ergebnis muss dann außerdem versiegelt sein;
-  `history` = Liste `[{lastModification, fields}]` in dieser Reihenfolge.
+  `history` = Liste `[{lastModification, fields}]` in dieser Reihenfolge; nennt ein
+  Verlaufseintrag der Erwartung `unknown`, wird bei ihm auch die Liste der unbekannten
+  Elemente **roh** verglichen (auch das Standard-AutoType).
 - **Lösch-Vermerke**, genau diese Menge mit diesen Zeiten.
 - `recycleBin` und `databaseName` nur, wenn angegeben.
 
@@ -555,6 +710,9 @@ mit kanonischem Wert (Hex) und Fingerabdruck. `fieldTimesJson` = der genaue Text
 | 29-datenbankname-und-papierkorb | Meta: Datenbankname und Papierkorb |
 | 30-gleiche-sekunde-speicher-gegen-datei | Speicher (ms) gegen Datei (s): Gruppe, Datenbankname, Eintrag ohne FieldTimes in derselben Sekunde |
 | 31-verlauf-gleiche-sekunde | dieselbe Fassung aus Speicher (ms) und Datei (s) steht nur einmal im Verlauf |
+| 32-ohne-fieldtimes-neuere-entfernt | beide Seiten ohne FieldTimes: Entfernungen der neueren Seite (ohne Verlauf) gewinnen |
+| 33-verlauf-doppelt-rohdaten | doppelte Verlaufsfassung, nur das Standard-AutoType verschieden: feste Wahl über alle Rohdaten |
+| 34-papierkorb-gleiche-sekunde | Papierkorb in derselben Sekunde verschieden gewählt: Gleichstand über `encodeParts([an/aus, UUID-Text])` |
 
 ## 10. Bekannte Grenzen
 
@@ -562,15 +720,25 @@ mit kanonischem Wert (Hex) und Fingerabdruck. `fieldTimesJson` = der genaue Text
   Verlaufseintrag geändert, z. B. per „in den Papierkorb“) gelten als komplett zur
   `lastModification` geändert; eine ältere Ownwarden-Änderung an einem anderen Feld dieses
   Eintrags verliert dann.
+- Haben **beide** Seiten keine FieldTimes, entscheidet die neuere Fassung auch, welche Felder
+  fehlen (5.1). Ein Feld, das auf der älteren Kopie gleichzeitig in KeePassXC neu angelegt
+  wurde, verliert dann gegen die neuere Fassung, die es nicht kennt (es bleibt im Verlauf).
+  Ist nur EINE Seite versiegelt, gilt die Regel nicht (die versiegelte Seite kann das Feld über
+  Ownwarden angelegt haben): Ein in KeePassXC ohne Verlaufseintrag entferntes Feld eines
+  unversiegelten Eintrags kommt dann über eine versiegelte Kopie, die es hat, zurück.
+- Ein entfernter Wert bleibt – wie jede überschriebene Fassung (5.1) – im Verlauf des
+  Ergebnisses. Wer ein Geheimnis in KeePassXC entfernt und den Verlauf löscht, bekommt es über
+  ein Gerät mit einer älteren Kopie wieder in den Verlauf (nicht in die aktuelle Fassung).
 - Ändert KeePassXC einen versiegelten Eintrag mehrmals, bekommen alle geänderten Felder die
   Zeit der letzten Änderung.
 - Änderungen innerhalb derselben Sekunde sind über KDBX-Zeiten nicht unterscheidbar
   (Löschen gegen Ändern: die Löschung gewinnt).
 - Die Kürzung nach `HistoryMaxSize` ist nicht in jedem Fall stabil: Ein erneuter Abgleich mit
   einer Eingabe kann eine kleine, früher weggefallene Fassung wieder aufnehmen.
-- Meta-Angaben, die von local übernommen werden (Verlaufsgrenzen, unbekannte Elemente,
-  KDBX-Einstellungen), hängen von der Rolle der Seiten ab. Folge: Ändert jemand diese Angaben
-  in KeePassXC, schreibt ein Gerät mit älterer Fassung im Speicher beim nächsten Abgleich
-  seine Fassung zurück.
+- Angaben, die `mergeVaults` von local übernimmt (Verlaufsgrenzen, unbekannte Meta- und
+  Root-Elemente, KDBX-Einstellungen), hängen von der Rolle der Seiten ab. Beim Abgleich ist das
+  ohne Folgen, weil der Client vorher die Werte der Server-Datei einsetzt (5.7): Ändert jemand
+  diese Angaben in KeePassXC, bleibt die Änderung erhalten. Ändert ein Gerät sie selbst, setzt
+  sich die Server-Fassung durch (Ownwarden ändert sie in Version 1 nicht).
 - Zwei Fassungen derselben Sekunde, die sich nur in CustomData oder anderen nicht kanonischen
-  Kleinigkeiten unterscheiden, zählen im Verlauf als eine.
+  Kleinigkeiten unterscheiden, zählen im Verlauf als eine; welche bleibt, legt 5.1 fest.

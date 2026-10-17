@@ -16,21 +16,29 @@
  *
  * Passkeys werden nur als Ganzes geschrieben (setPasskey/removePasskey), nie Attribut für
  * Attribut – sonst könnten beim Zusammenführen Teile zweier Passkeys gemischt werden.
+ *
+ * Texte mit Zeichen, die KDBX nicht speichern kann (Steuerzeichen außer Tab/LF/CR, U+FFFE,
+ * U+FFFF, einzelne Surrogate; in geschützten Werten nur einzelne Surrogate), werden mit einem
+ * RangeError abgelehnt und nie still verändert (checkStorable).
  */
 import type { FieldKey } from "../contracts";
 import type { DeletedObject, Entry, Group, Millis, ProtectedString, Uuid, Vault } from "../model";
 import { cloneEntry } from "./clone";
 import type { MonotonicClock } from "./clock";
-import { sameBytes, toSeconds } from "./encoding";
+import { MAX_KDBX_TIME, sameBytes, toSeconds } from "./encoding";
 import { effectiveFieldTimes, newestFieldTime, sealFieldTimes, type FieldTime } from "./field-times";
 import {
+  COLORS_FIELD,
   entryFields,
   exactFieldBytes,
+  fieldKind,
   isPasskeyAttribute,
   isStandardField,
   materializeStandardFields,
+  OVERRIDE_URL_FIELD,
   PARENT_FIELD,
   PROPERTY_FIELDS,
+  TAGS_FIELD,
   trimTag,
 } from "./fields";
 import { historySnapshot, truncateHistory } from "./history";
@@ -73,7 +81,7 @@ export function createEntry(
   const group = requireGroup(vault, groupUuid);
   for (const name of Object.keys(fields)) checkFieldName(name);
   const uuid = options.uuid ?? newUuid();
-  if (findEntryLocation(vault, uuid) !== undefined) throw new Error(`Es gibt schon einen Eintrag mit der UUID ${uuid}.`);
+  checkUuidFree(vault, uuid);
 
   const now = clock.now();
   const entry: Entry = {
@@ -118,6 +126,7 @@ export function editEntry(vault: Vault, entryUuid: Uuid, mutate: (draft: Entry) 
   const after = entryFields(draft, group.uuid);
   const changed = changedKeys(entry, draft, before.values, after);
   if (changed.length === 0) return entry;
+  checkStorableFields(draft, changed);
 
   clock.observe(Math.max(newestFieldTime(before.times), entry.times.lastModification));
   const now = clock.now();
@@ -196,6 +205,7 @@ export function setAttachment(
   clock: MonotonicClock,
 ): Entry {
   if (name === "") throw new RangeError("Ein Anhang braucht einen Namen.");
+  checkStorable("Der Name des Anhangs", name);
   const copy = data.slice();
   return editEntry(
     vault,
@@ -355,8 +365,9 @@ export interface CreateGroupOptions {
 /** Legt eine Gruppe unter `parentUuid` an. */
 export function createGroup(vault: Vault, parentUuid: Uuid, name: string, clock: MonotonicClock, options: CreateGroupOptions = {}): Group {
   const parent = requireGroup(vault, parentUuid);
+  checkStorable("Der Gruppenname", name);
   const uuid = options.uuid ?? newUuid();
-  if (findGroupLocation(vault, uuid) !== undefined) throw new Error(`Es gibt schon eine Gruppe mit der UUID ${uuid}.`);
+  checkUuidFree(vault, uuid);
   const now = clock.now();
   const group: Group = {
     uuid,
@@ -378,16 +389,19 @@ export function createGroup(vault: Vault, parentUuid: Uuid, name: string, clock:
  * Meldet der Uhr die letzte GANZE Millisekunde der Sekunde von `time`: Das nächste now() liegt
  * dann mindestens in der folgenden Sekunde. Nötig für alles, was nur sekundengenau verglichen
  * wird (Gruppen, Meta-Zeiten): Eine Änderung in derselben Sekunde wie die vorherige wäre sonst
- * ein Gleichstand und könnte gegen die ältere Fassung verlieren.
+ * ein Gleichstand und könnte gegen die ältere Fassung verlieren. In der letzten Sekunde des
+ * KDBX-Bereichs gibt es keine folgende mehr: dann höchstens MAX_KDBX_TIME (sonst ignorierte die
+ * Uhr den Wert als ungültig).
  */
 function observeWholeSecond(clock: MonotonicClock, time: Millis): void {
-  clock.observe((toSeconds(time) + 1) * 1000 - 1);
+  clock.observe(Math.min((toSeconds(time) + 1) * 1000 - 1, MAX_KDBX_TIME));
 }
 
 /** Benennt eine Gruppe um (lastModification = jetzt, mindestens die nächste ganze Sekunde). */
 export function renameGroup(vault: Vault, groupUuid: Uuid, name: string, clock: MonotonicClock): Group {
   const group = requireGroup(vault, groupUuid);
   if (group.name === name) return group;
+  checkStorable("Der Gruppenname", name);
   observeWholeSecond(clock, group.times.lastModification);
   const now = clock.now();
   group.name = name;
@@ -441,6 +455,15 @@ export function deleteGroup(vault: Vault, groupUuid: Uuid, clock: MonotonicClock
 // Hilfsfunktionen
 // ---------------------------------------------------------------------------
 
+/**
+ * Gruppen und Einträge teilen sich EINEN Namensraum für UUIDs (wie bei KeePass und beim
+ * KDBX-Leser, spec/README.md 5.2); mergeVaults bricht bei doppelten UUIDs ab.
+ */
+function checkUuidFree(vault: Vault, uuid: Uuid): void {
+  if (findEntryLocation(vault, uuid) !== undefined) throw new Error(`Es gibt schon einen Eintrag mit der UUID ${uuid}.`);
+  if (findGroupLocation(vault, uuid) !== undefined) throw new Error(`Es gibt schon eine Gruppe mit der UUID ${uuid}.`);
+}
+
 function requireEntry(vault: Vault, entryUuid: Uuid): EntryLocation {
   const location = findEntryLocation(vault, entryUuid);
   if (location === undefined) throw new Error(`Eintrag ${entryUuid} nicht gefunden.`);
@@ -455,21 +478,86 @@ function requireGroup(vault: Vault, groupUuid: Uuid): Group {
 
 function checkFieldName(name: string): void {
   if (name === "") throw new RangeError("Ein Feld braucht einen Namen.");
+  checkStorable("Der Feldname", name);
   if (isPasskeyAttribute(name)) throw new RangeError(`"${name}" ist ein Passkey-Attribut – bitte setPasskey/removePasskey benutzen.`);
+}
+
+/**
+ * Zeichen, die KDBX in Text nicht speichern kann – genau die, die der Writer still entfernt
+ * (kdbx/xml-dom.ts, stripInvalidXmlChars): Steuerzeichen außer Tab, LF und CR (z. B. U+000B,
+ * der „manuelle Zeilenumbruch“ aus Word), U+FFFE, U+FFFF und einzelne (ungepaarte)
+ * UTF-16-Surrogate.
+ */
+const UNSTORABLE_TEXT = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Geschützte Werte stehen verschlüsselt (Base64) in der Datei; dort geht nur ein einzelnes
+ * Surrogat verloren: UTF-8 kennt es nicht, TextEncoder macht daraus U+FFFD.
+ */
+const UNSTORABLE_PROTECTED = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Lehnt Text mit Zeichen ab, die KDBX nicht speichern kann (UNSTORABLE_TEXT bzw. bei
+ * geschützten Werten UNSTORABLE_PROTECTED). Still entfernen oder ersetzen kommt nicht in Frage:
+ * Der Nutzer verlöre unbemerkt Daten, und das Modell im Speicher wiche von der Datei ab – jeder
+ * Abgleich schriebe dann erneut (mit Sicherungskopie). Die Meldung nennt nie den Wert selbst.
+ */
+function checkStorable(what: string, text: string, isProtected = false): void {
+  const match = (isProtected ? UNSTORABLE_PROTECTED : UNSTORABLE_TEXT).exec(text);
+  if (match === null) return;
+  const code = `U+${match[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+  const forbidden = isProtected
+    ? "In geschützten Werten sind einzelne UTF-16-Surrogate nicht erlaubt."
+    : "Nicht erlaubt sind Steuerzeichen außer Tabulator und Zeilenumbruch, U+FFFE, U+FFFF und einzelne UTF-16-Surrogate.";
+  throw new RangeError(`${what} enthält das Zeichen ${code}, das KDBX nicht speichern kann. ${forbidden}`);
+}
+
+/** Prüft alle Texte eines Eintrags, die zu den geänderten Feldern `keys` gehören (checkStorable). */
+function checkStorableFields(entry: Entry, keys: readonly FieldKey[]): void {
+  const checkString = (name: string): void => {
+    const value = entry.strings.get(name);
+    if (value === undefined) return;
+    checkStorable("Der Feldname", name);
+    checkStorable(`Das Feld "${name}"`, value.value, value.protected);
+  };
+  for (const key of keys) {
+    const kind = fieldKind(key);
+    if (kind.kind === "string") {
+      checkString(kind.name);
+    } else if (kind.kind === "passkey") {
+      for (const name of entry.strings.keys()) if (isPasskeyAttribute(name)) checkString(name);
+    } else if (kind.kind === "attachment") {
+      checkStorable("Der Name des Anhangs", kind.name);
+    } else if (kind.kind === "customData") {
+      const item = entry.customData.get(kind.name);
+      if (item === undefined) continue;
+      checkStorable("Der CustomData-Schlüssel", kind.name);
+      checkStorable(`Der CustomData-Wert "${kind.name}"`, item.value);
+    } else if (key === TAGS_FIELD) {
+      for (const tag of entry.tags) checkStorable("Ein Tag", tag);
+    } else if (key === COLORS_FIELD) {
+      checkStorable("Die Vordergrundfarbe", entry.foregroundColor);
+      checkStorable("Die Hintergrundfarbe", entry.backgroundColor);
+    } else if (key === OVERRIDE_URL_FIELD) {
+      checkStorable("Die OverrideURL", entry.overrideUrl);
+    }
+  }
 }
 
 /** Eingabe -> ProtectedString; ein einfacher String ist nur beim Feld "Password" geschützt. */
 function toProtectedString(name: string, value: FieldInput): ProtectedString {
-  if (typeof value !== "string") return { ...value };
-  return { value, protected: name === "Password" };
+  const result = typeof value === "string" ? { value, protected: name === "Password" } : { ...value };
+  checkStorable(`Das Feld "${name}"`, result.value, result.protected);
+  return result;
 }
 
-/** Bereinigt Tags (siehe setTags); wirft bei Trennzeichen. */
+/** Bereinigt Tags (siehe setTags); wirft bei Trennzeichen und bei Zeichen, die KDBX nicht speichern kann. */
 export function sanitizeTags(tags: readonly string[]): string[] {
   const result: string[] = [];
   for (const raw of tags) {
     const tag = trimTag(raw);
     if (/[,;]/.test(tag)) throw new RangeError(`Tag "${tag}" enthält "," oder ";" – das ist in KDBX nicht möglich.`);
+    checkStorable("Ein Tag", tag);
     if (tag !== "" && !result.includes(tag)) result.push(tag);
   }
   return result;

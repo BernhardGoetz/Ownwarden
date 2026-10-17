@@ -15,7 +15,7 @@
  *
  * Abgeglichen mit KeePassXC 2.7.6: src/streams/HmacBlockStream.cpp.
  */
-import { ByteReader, ByteWriter, bytesEqual, concatBytes, corrupt, u64le } from "./bytes";
+import { ByteReader, ByteWriter, bytesEqual, concatByteArrays, corrupt, u64le } from "./bytes";
 import { HMAC_BLOCK_SIZE, MAX_PAYLOAD_BYTES } from "./constants";
 import { hmacSha256, sha512 } from "./crypto";
 
@@ -62,7 +62,7 @@ export async function readHmacBlockStream(stream: Uint8Array, hmacBaseKey: Uint8
     if (total > MAX_PAYLOAD_BYTES) corrupt("HMAC-Blockstrom: Inhalt ist unplausibel groß.");
     blocks.push(data);
   }
-  return concatBytes(...blocks);
+  return concatByteArrays(blocks);
 }
 
 /**

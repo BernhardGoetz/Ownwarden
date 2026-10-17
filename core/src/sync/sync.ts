@@ -3,20 +3,25 @@
  * contracts.ts). Ablauf eines Versuchs:
  *
  *   1. Datei lesen.
- *      - Gibt es keine: lokale Fassung mit "If-None-Match: *" anlegen. Kam ein anderes Gerät
- *        zuvor (412), nächster Versuch. (Die Uhr wird hier nicht geprüft: Ohne Datei gibt es
- *        vorher keinen Date-Header, und ohne Zusammenführen entscheidet keine Uhrzeit etwas.)
+ *      - Gibt es keine: Zeitstempel der lokalen Fassung prüfen (keiner nach now() +
+ *        maxClockSkewMs, sonst FutureTimestampsError), dann mit "If-None-Match: *" anlegen.
+ *        Kam ein anderes Gerät zuvor (412), nächster Versuch. (Die Geräteuhr selbst lässt
+ *        sich hier nicht prüfen: Ohne Datei gibt es vorher keinen Date-Header.)
  *   2. Ohne ETag abbrechen: Ohne ETag ist kein bedingtes Schreiben möglich.
  *   3. Geräteuhr gegen den Date-Header prüfen; bei zu großer Abweichung abbrechen
  *      (ClockSkewError), BEVOR irgendetwas geschrieben wird.
- *   4. Datei entschlüsseln und mit der lokalen Fassung zusammenführen (options.merge).
- *      Einstellungen ohne Zeitstempel übernimmt Ownwarden vorher vom Server (siehe
- *      adoptServerSettings).
- *   5. Ist das Ergebnis inhaltlich gleich der Datei (vaultsEquivalent), nichts schreiben.
- *   6. Sonst: verschlüsseln, Sicherungskopie der Server-Fassung anlegen (scheitert sie,
- *      wird NICHT geschrieben; scheitert nur das Aufräumen ALTER Kopien, geht es weiter und
- *      result.warnings nennt das Problem), dann mit "If-Match: <ETag>" schreiben. Bei 412 hat ein
- *      anderes Gerät dazwischen geschrieben: nächster Versuch (neu lesen, neu zusammenführen).
+ *   4. Datei entschlüsseln. Enthält die lokale Fassung Zeitstempel aus der Zukunft (siehe
+ *      checkFutureTimes), abbrechen (FutureTimestampsError), BEVOR etwas geschrieben wird.
+ *   5. Mit der lokalen Fassung zusammenführen (options.merge). Einstellungen ohne Zeitstempel
+ *      übernimmt Ownwarden vorher vom Server (siehe adoptServerSettings).
+ *   6. Ist das Ergebnis inhaltlich gleich der Datei (vaultsEquivalent), nichts schreiben.
+ *   7. Sonst: verschlüsseln, Sicherungskopie der Server-Fassung sicherstellen (adapter.backup;
+ *      pro Fassung nur einmal; scheitert sie, wird NICHT geschrieben), dann mit
+ *      "If-Match: <ETag>" schreiben. Bei 412 hat ein anderes Gerät dazwischen geschrieben:
+ *      nächster Versuch (neu lesen, neu zusammenführen).
+ *   8. Erst nach dem erfolgreichen Schreiben alte Sicherungskopien aufräumen
+ *      (adapter.pruneBackups, „best effort“: Probleme landen in result.warnings). So vernichten
+ *      gescheiterte Schreibversuche nie ältere Sicherungen (Review xc-1).
  *
  * Nach options.maxAttempts Versuchen ohne Erfolg: PreconditionFailedError.
  *
@@ -26,6 +31,7 @@
  */
 import {
   ClockSkewError,
+  FutureTimestampsError,
   PreconditionFailedError,
   StorageAuthError,
   StorageError,
@@ -36,7 +42,8 @@ import {
   type SyncVault,
   type VaultCodec,
 } from "../contracts";
-import type { Vault } from "../model";
+import type { Millis, Vault } from "../model";
+import { latestVaultTime } from "../merge/clock";
 import { vaultsEquivalent } from "./vault-equal";
 
 /**
@@ -59,7 +66,7 @@ type AttemptOutcome = SyncResult | "retry";
 export const syncVault: SyncVault = async (local, adapter, codec, options) => {
   checkOptions(options);
   // Hinweise aus ALLEN Versuchen sammeln: Auch ein Versuch, der danach 412 bekam, hat schon
-  // gesichert und aufgeräumt (bzw. es nicht geschafft).
+  // gesichert (bzw. dabei Hinweise bekommen).
   const warnings: string[] = [];
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
     const outcome = await syncAttempt(local, adapter, codec, options, attempt, warnings);
@@ -80,13 +87,14 @@ async function syncAttempt(
   warnings: string[],
 ): Promise<AttemptOutcome> {
   const remote = await adapter.read();
-  if (remote === null) return createRemote(local, adapter, codec, attempt);
+  if (remote === null) return createRemote(local, adapter, codec, options, attempt);
 
   requireEtag(remote, adapter);
   const now = options.now();
   checkClockSkew(remote, now, options.maxClockSkewMs);
 
   const remoteVault = await codec.decode(remote.data);
+  checkFutureTimes(local, Math.max(remote.serverDate ?? now, latestVaultTime(remoteVault)) + options.maxClockSkewMs);
   const { vault: merged, report } = options.merge(adoptServerSettings(local, remoteVault), remoteVault, { now });
   if (vaultsEquivalent(merged, remoteVault)) {
     return { vault: merged, etag: remote.etag, attempts: attempt, created: false, written: false, report };
@@ -95,18 +103,23 @@ async function syncAttempt(
   // Erst verschlüsseln, dann sichern: Scheitert das Verschlüsseln, entsteht keine unnötige
   // Sicherungskopie; und zwischen Sicherung und Schreiben liegt so wenig Zeit wie möglich.
   const data = await codec.encode(merged);
-  warnings.push(...(await backupOrAbort(adapter, remote, options.backupsToKeep)));
+  warnings.push(...(await backupOrAbort(adapter, remote)));
+  let written: { etag: string | null };
   try {
-    const written = await adapter.write(data, { ifMatch: remote.etag });
-    return { vault: merged, etag: written.etag, attempts: attempt, created: false, written: true, report };
+    written = await adapter.write(data, { ifMatch: remote.etag });
   } catch (error) {
     if (error instanceof PreconditionFailedError) return "retry";
     throw error;
   }
+  // Aufräumen erst jetzt, nach dem erfolgreichen Schreiben (Review xc-1, siehe Kopfkommentar).
+  warnings.push(...(await pruneBackupsBestEffort(adapter, remote, options.backupsToKeep)));
+  return { vault: merged, etag: written.etag, attempts: attempt, created: false, written: true, report };
 }
 
 /** Erstes Hochladen: Die Datei gibt es noch nicht. */
-async function createRemote(local: Vault, adapter: StorageAdapter, codec: VaultCodec, attempt: number): Promise<AttemptOutcome> {
+async function createRemote(local: Vault, adapter: StorageAdapter, codec: VaultCodec, options: SyncOptions, attempt: number): Promise<AttemptOutcome> {
+  // Ohne Datei gibt es keine Serverzeit: Grenze ist die Gerätezeit.
+  checkFutureTimes(local, options.now() + options.maxClockSkewMs);
   const data = await codec.encode(local);
   try {
     // "If-None-Match: *": Legt ein anderes Gerät die Datei gerade gleichzeitig an, gewinnt
@@ -146,6 +159,29 @@ function checkClockSkew(remote: RemoteFile, now: number, maxClockSkewMs: number)
 }
 
 /**
+ * Zeitstempel aus der Zukunft in der lokalen Fassung (Entscheidung des Eigentümers, 2026-10-17;
+ * Review merge-2/sync-2): checkClockSkew sieht nur die Uhr IM MOMENT des Abgleichs. Hat das
+ * Gerät offline mit vorgehender Uhr bearbeitet und wurde die Uhr danach gestellt, tragen die
+ * Änderungen trotzdem Zeiten aus der Zukunft – sie schlügen still jede echte neuere Änderung.
+ * Deshalb wird jede für den Merge zählende Zeit (latestVaultTime: Feld-Zeitstempel, Zeiten von
+ * Einträgen samt Verlauf und Gruppen, Löschzeiten, Meta-Zeiten) gegen `limit` geprüft.
+ * Reparatur: restampFutureTimes (future-times.ts).
+ *
+ * Grenze (syncAttempt): die Serverzeit (Date-Header; fehlt er: die Gerätezeit) plus
+ * maxClockSkewMs. Ausnahme: Enthält die Datei auf dem Server selbst schon spätere Zeiten
+ * (z. B. von KeePassXC auf einem Gerät mit falscher Uhr), zählt deren spätester Zeitstempel als
+ * Serverzeit. Diese Zeiten kommen beim Zusammenführen ohnehin in jede lokale Fassung (und über
+ * VaultClock auch neue Änderungen knapp danach); ohne die Ausnahme verweigerte danach JEDES
+ * Gerät dauerhaft den Abgleich, und auch die Reparatur hülfe nicht, weil der nächste Merge die
+ * Zeiten vom Server zurückbringt. Weiter in die Zukunft als die Datei auf dem Server kommt so
+ * nichts (bis auf maxClockSkewMs).
+ */
+function checkFutureTimes(local: Vault, limit: Millis): void {
+  const latest = latestVaultTime(local);
+  if (latest > limit) throw new FutureTimestampsError(latest, limit);
+}
+
+/**
  * Datenbank-Einstellungen ohne Zeitstempel: Die Fassung auf dem Server gewinnt
  * (PROJECT-CONTEXT, entschieden 2026-10-15). Das sind die KDBX-Einstellungen
  * (Verschlüsselung, Schlüsselableitung, Kompression), die Verlaufsgrenzen, unbekannte
@@ -172,14 +208,13 @@ export function adoptServerSettings(local: Vault, remote: Vault): Vault {
 }
 
 /**
- * Sicherungskopie anlegen; scheitert sie, wird mit klarer Meldung abgebrochen (nichts
- * geschrieben). Liefert die Hinweise des Adapters, z. B. wenn sich alte Sicherungskopien nicht
- * löschen ließen – das Aufräumen ist „best effort“ und blockiert den Abgleich nicht
- * (StorageAdapter.backup in contracts.ts).
+ * Sicherungskopie der Server-Fassung sicherstellen; scheitert das, wird mit klarer Meldung
+ * abgebrochen (nichts geschrieben). Liefert die Hinweise des Adapters (StorageAdapter.backup
+ * in contracts.ts). Aufgeräumt wird hier NICHT, sondern erst nach dem Schreiben.
  */
-async function backupOrAbort(adapter: StorageAdapter, remote: RemoteFile, keep: number): Promise<string[]> {
+async function backupOrAbort(adapter: StorageAdapter, remote: RemoteFile): Promise<string[]> {
   try {
-    const result = await adapter.backup(remote, keep);
+    const result = await adapter.backup(remote);
     return result?.warnings ?? [];
   } catch (error) {
     // Abgelehnte Anmeldung unverändert weiterreichen: Die Oberfläche fragt dann nach dem Passwort.
@@ -192,6 +227,22 @@ async function backupOrAbort(adapter: StorageAdapter, remote: RemoteFile, keep: 
     );
     wrapped.cause = error;
     throw wrapped;
+  }
+}
+
+/**
+ * Alte Sicherungskopien aufräumen, nachdem `remote` erfolgreich überschrieben wurde. „Best
+ * effort“: Die neue Fassung ist schon geschrieben; ein Fehler hier darf den Abgleich nicht
+ * nachträglich scheitern lassen (sonst übernähme der Aufrufer das Ergebnis nicht). Wirft der
+ * Adapter trotzdem, wird daraus ein Hinweis.
+ */
+async function pruneBackupsBestEffort(adapter: StorageAdapter, remote: RemoteFile, keep: number): Promise<string[]> {
+  try {
+    const result = await adapter.pruneBackups(remote, keep);
+    return result?.warnings ?? [];
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return [`Alte Sicherungskopien auf ${adapter.describe()} wurden nicht aufgeräumt (${reason}).`];
   }
 }
 

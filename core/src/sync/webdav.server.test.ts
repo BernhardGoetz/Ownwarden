@@ -12,6 +12,7 @@ import { PreconditionFailedError, StorageAuthError, type SyncOptions } from "../
 import { createVaultClock } from "../merge/clock";
 import { mergeVaults } from "../merge/merge";
 import { createEntry, setField } from "../merge/vault-ops";
+import { backupFileName } from "./backup-names";
 import { basicAuthorization } from "./http";
 import { createKdbxCodec } from "./kdbx-codec";
 import { syncVault } from "./sync";
@@ -99,7 +100,7 @@ describe.skipIf(!webDavTestServerAvailable())("WebDavAdapter gegen den SabreDAV-
     const failures = await Promise.allSettled([
       wrong.read(),
       wrong.write(bytes("y"), { ifNoneMatch: "*" }),
-      wrong.backup({ data: bytes("x"), etag: '"1"' }, 3),
+      wrong.backup({ data: bytes("x"), etag: '"1"' }),
     ]);
 
     for (const failure of failures) {
@@ -124,22 +125,26 @@ describe.skipIf(!webDavTestServerAvailable())("WebDavAdapter gegen den SabreDAV-
     writeFileSync(join(backupDir, "notizen.txt"), "fremd");
 
     await adapter.write(bytes("Fassung 0"), { ifNoneMatch: "*" });
+    const etags: string[] = [];
     for (let version = 1; version <= 5; version++) {
       const current = (await adapter.read())!;
-      await adapter.backup(current, 3);
+      etags.push(current.etag);
+      await adapter.backup(current);
+      await adapter.backup(current); // dieselbe Fassung: keine zweite Kopie (Review xc-1)
       await adapter.write(bytes(`Fassung ${version}`), { ifMatch: current.etag });
+      await adapter.pruneBackups(current, 3);
     }
 
     const names = readdirSync(backupDir).sort();
     expect(names).toEqual([
       "anderer.20200101-000000-000.kdbx",
-      "backup.20261015-120003-000.kdbx",
-      "backup.20261015-120004-000.kdbx",
-      "backup.20261015-120005-000.kdbx",
+      backupFileName("backup.kdbx", Date.UTC(2026, 9, 15, 12, 0, 3), etags[2]!),
+      backupFileName("backup.kdbx", Date.UTC(2026, 9, 15, 12, 0, 4), etags[3]!),
+      backupFileName("backup.kdbx", Date.UTC(2026, 9, 15, 12, 0, 5), etags[4]!),
       "notizen.txt",
     ]);
-    expect(readFileSync(join(backupDir, "backup.20261015-120005-000.kdbx"), "utf8")).toBe("Fassung 4");
-    expect(readFileSync(join(backupDir, "backup.20261015-120003-000.kdbx"), "utf8")).toBe("Fassung 2");
+    expect(readFileSync(join(backupDir, names[3]!), "utf8")).toBe("Fassung 4");
+    expect(readFileSync(join(backupDir, names[1]!), "utf8")).toBe("Fassung 2");
   });
 
   it("ohne COPY-Unterstützung lädt backup() die gelesenen Bytes hoch", async () => {
@@ -148,9 +153,11 @@ describe.skipIf(!webDavTestServerAvailable())("WebDavAdapter gegen den SabreDAV-
     const adapter = adapterFor("nocopy.kdbx", { fetch: noCopy, now: () => Date.UTC(2026, 0, 2, 3, 4, 5, 6) });
     await adapter.write(bytes("Original"), { ifNoneMatch: "*" });
 
-    await adapter.backup((await adapter.read())!, 2);
+    const current = (await adapter.read())!;
+    await adapter.backup(current);
 
-    expect(readFileSync(join(server.dataDir, "ownwarden-backups", "nocopy.20260102-030405-006.kdbx"), "utf8")).toBe("Original");
+    const name = backupFileName("nocopy.kdbx", Date.UTC(2026, 0, 2, 3, 4, 5, 6), current.etag);
+    expect(readFileSync(join(server.dataDir, "ownwarden-backups", name), "utf8")).toBe("Original");
   });
 
   it("ohne ETag im GET holt read() ihn per PROPFIND (gleicher Wert)", async () => {
@@ -293,11 +300,12 @@ describe.skipIf(!webDavTestServerAvailable())("syncVault über WebDAV mit echten
     const final = await codec.decode((await vivaldi.read())!.data);
     expect(entryByTitle(final, "Mail").strings.get("UserName")?.value).toBe("alice");
     expect(entryByTitle(final, "Mail").strings.get("Password")?.value).toBe("neu");
-    // Backups: vor Vivaldis Schreiben und vor Chromes erfolgreichem Schreiben (der erste Versuch
-    // hatte ebenfalls schon gesichert, bevor er 412 bekam).
+    // Backups: Chromes erster Versuch sicherte die Ausgangsfassung, bevor er 412 bekam; Vivaldi
+    // fand diese Sicherung derselben Fassung vor und legte keine zweite an (Review xc-1, bisher
+    // 3 Kopien); Chromes zweiter Versuch sicherte Vivaldis Fassung.
     const backups = readdirSync(join(server.dataDir, "Ownwarden", "ownwarden-backups"));
-    expect(backups.length).toBe(3);
-    for (const name of backups) expect(name).toMatch(/^tresor\.\d{8}-\d{6}-\d{3}\.kdbx$/);
+    expect(backups.length).toBe(2);
+    for (const name of backups) expect(name).toMatch(/^tresor\.\d{8}-\d{6}-\d{3}\.[0-9a-f]{12}\.kdbx$/);
 
     // Danach: Vivaldi übernimmt Chromes Stand ohne zu schreiben.
     const again = await syncVault(vaultA, vivaldi, codec, options());

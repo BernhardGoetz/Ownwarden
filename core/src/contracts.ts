@@ -154,8 +154,23 @@ export interface MergeResult {
 
 /**
  * merge/merge.ts: führt zwei Fassungen derselben Datenbank zusammen. Reine Funktion:
- * verändert `local` und `remote` nicht. Das Ergebnis ist unabhängig davon, welche Seite
- * `local` und welche `remote` ist (bis auf das Feld `winner` im Bericht).
+ * verändert `local` und `remote` nicht.
+ *
+ * Unabhängig davon, welche Seite `local` und welche `remote` ist (merge(a, b) und merge(b, a)
+ * liefern dasselbe): welche Einträge, Gruppen und Lösch-Vermerke das Ergebnis enthält, jedes
+ * Feld eines Eintrags samt Feld-Zeitstempeln, der Verlauf, die Eigenschaften und die Position
+ * jeder Gruppe, die Meta-Angaben mit Zeitstempel (Datenbankname, Papierkorb, eigene Icons,
+ * Meta-CustomData), die UUID der Wurzel (die kleinere) und versionMinor (das Maximum).
+ *
+ * Von der Rolle der Seiten abhängig:
+ *   - die Reihenfolge von Geschwistern (erst wie in `local`, dann die nur in `remote`);
+ *   - von `local` übernommen: die KDBX-Einstellungen außer versionMinor (Verschlüsselung,
+ *     Schlüsselableitung, Kompression, publicCustomData), die Verlaufsgrenzen
+ *     (historyMaxItems, historyMaxSize), unbekannte Meta-Elemente (meta.unknown) und unbekannte
+ *     Elemente unter <Root> (rootUnknown);
+ *   - das Feld `winner` im Bericht.
+ * syncVault setzt die von `local` übernommenen Angaben vorher auf die Werte des Servers
+ * (adoptServerSettings in sync/sync.ts): Beim Abgleich gewinnt dort die Datei auf dem Server.
  */
 export type MergeVaults = (local: Vault, remote: Vault, options: MergeOptions) => MergeResult;
 
@@ -194,6 +209,38 @@ export class ClockSkewError extends Error {
   }
 }
 
+/**
+ * Die lokale Datenbank enthält Zeitstempel aus der Zukunft: später als die Serverzeit (beim
+ * ersten Hochladen: die Gerätezeit) plus SyncOptions.maxClockSkewMs. Typisch: Das Gerät hat
+ * offline mit falsch gehender Uhr bearbeitet, die Uhr wurde vor dem Abgleich gestellt. Solche
+ * Änderungen würden jede echte neuere Änderung anderer Geräte und jede Löschung in KeePassXC
+ * still schlagen, bis die echte Zeit sie eingeholt hat (Entscheidung des Eigentümers,
+ * 2026-10-17). syncVault schreibt dann nichts. Reparatur: restampFutureTimes (sync/future-times.ts).
+ */
+export class FutureTimestampsError extends Error {
+  constructor(
+    /** Der späteste Zeitstempel der lokalen Datenbank (wie latestVaultTime). */
+    readonly latestTime: Millis,
+    /** Spätester erlaubter Zeitstempel. */
+    readonly limit: Millis,
+  ) {
+    super(
+      `Die lokale Datenbank enthält Zeitstempel aus der Zukunft (bis ${isoTime(latestTime)}, erlaubt sind höchstens ` +
+        `${isoTime(limit)}). Vermutlich ging die Geräteuhr beim Bearbeiten falsch. So gleicht Ownwarden nicht ab: Diese ` +
+        "Änderungen würden sonst neuere Änderungen anderer Geräte und Löschungen in KeePassXC still überschreiben. Es " +
+        "wurde nichts geschrieben. Abhilfe: Geräteuhr prüfen, dann die Zeitstempel reparieren (Reparatur-Befehl bzw. " +
+        "restampFutureTimes). Die betroffenen Änderungen gelten danach als jetzt gemacht.",
+    );
+    this.name = "FutureTimestampsError";
+  }
+}
+
+/** Zeit für Meldungen (UTC, ISO 8601); bei ungültiger Zeit die Zahl. */
+function isoTime(time: Millis): string {
+  const date = new Date(time);
+  return Number.isNaN(date.getTime()) ? String(time) : date.toISOString();
+}
+
 export interface RemoteFile {
   data: Uint8Array;
   /** ETag genau so, wie der Server ihn geliefert hat (inkl. Anführungszeichen/W/). */
@@ -204,12 +251,25 @@ export interface RemoteFile {
 
 export type WriteCondition = { ifMatch: string } | { ifNoneMatch: "*" };
 
-/** Ergebnis von StorageAdapter.backup (Ergänzung vom 2026-10-16, siehe dort). */
+/** Ergebnis von StorageAdapter.backup und StorageAdapter.pruneBackups (Ergänzung vom 2026-10-16). */
 export interface BackupResult {
   /** Hinweise, die den Abgleich NICHT aufhalten (deutsch, ohne Zugangsdaten). Leer: keine. */
   warnings: string[];
 }
 
+/**
+ * Speicher für die Tresor-Datei samt Sicherungskopien.
+ *
+ * Sicherungskopien (geändert 2026-10-17, Review xc-1): Früher hat backup() gleich auch alte
+ * Kopien gelöscht – VOR dem Schreiben. Scheiterte das Schreiben danach immer wieder (z. B. 423
+ * bei einer hängenden Dateisperre), legte jeder Versuch eine weitere Kopie derselben Fassung an
+ * und löschte dafür eine ältere, andere: Nach wenigen Abgleichen gab es nur noch Kopien EINER
+ * Fassung. Deshalb jetzt in zwei Schritten:
+ *   1. backup(current) vor dem Schreiben: legt die Kopie an, aber nur EINMAL pro Fassung
+ *      (erkannt am ETag; gibt es schon eine vollständige Kopie dieser Fassung, passiert nichts).
+ *   2. pruneBackups(current, keep) erst NACH einem erfolgreichen Schreiben: räumt auf.
+ * Gescheiterte Schreibversuche verringern so nie die Zahl der verschiedenen gesicherten Fassungen.
+ */
 export interface StorageAdapter {
   /** Für Meldungen, ohne Zugangsdaten. */
   describe(): string;
@@ -218,14 +278,24 @@ export interface StorageAdapter {
   /** Wirft PreconditionFailedError bei 412. Liefert den neuen ETag, falls der Server ihn nennt. */
   write(data: Uint8Array, condition: WriteCondition): Promise<{ etag: string | null; serverDate?: Millis }>;
   /**
-   * Legt eine Sicherungskopie der aktuellen Fassung an und behält nur die neuesten `keep`.
+   * Stellt sicher, dass es eine Sicherungskopie der Fassung `current` gibt (gelesen mit read(),
+   * erkannt an current.etag), und legt sie sonst an. Wiederholte Aufrufe für dieselbe Fassung
+   * legen keine weiteren Kopien an. Löscht nichts.
    *
-   * Das Anlegen ist Pflicht: Scheitert es, wirft backup (syncVault schreibt dann nicht).
-   * Das Aufräumen alter Kopien ist „best effort“ (Entscheidung des Eigentümers, 2026-10-16):
-   * Lässt sich eine alte Kopie nicht auflisten oder löschen (z. B. 403/423), wirft backup
-   * NICHT, sondern meldet es in `warnings`. Rückgabe `void` (ältere Adapter) heißt: keine Hinweise.
+   * Pflicht: Lässt sich die Kopie nicht anlegen, wirft backup (syncVault schreibt dann nicht).
+   * Rückgabe `void` heißt: keine Hinweise.
    */
-  backup(current: RemoteFile, keep: number): Promise<BackupResult | void>;
+  backup(current: RemoteFile): Promise<BackupResult | void>;
+  /**
+   * Räumt alte Sicherungskopien auf, bis nur noch die neuesten `keep` übrig sind; die Kopie der
+   * Fassung `current` (eben überschrieben) bleibt immer. syncVault ruft das nur nach einem
+   * ERFOLGREICHEN Schreiben auf.
+   *
+   * „Best effort“ (Entscheidung des Eigentümers, 2026-10-16): Lässt sich der Sicherungsordner
+   * nicht auflisten oder eine alte Kopie nicht löschen (z. B. 403/423), wirft pruneBackups
+   * NICHT, sondern meldet es in `warnings`. Rückgabe `void` heißt: keine Hinweise.
+   */
+  pruneBackups(current: RemoteFile, keep: number): Promise<BackupResult | void>;
 }
 
 /** Wandelt Datei-Bytes und Modell ineinander um (schließt die Zugangsdaten ein). */
@@ -239,7 +309,11 @@ export interface SyncOptions {
   merge: MergeVaults;
   /** Wie oft bei 412 neu geladen und zusammengeführt wird. */
   maxAttempts: number;
-  /** Erlaubte Abweichung der Geräteuhr vom Date-Header des Servers. */
+  /**
+   * Erlaubte Abweichung der Geräteuhr vom Date-Header des Servers. Zugleich die Grenze für
+   * Zeitstempel in der lokalen Datenbank: keiner später als Serverzeit (beim ersten Hochladen:
+   * now()) plus maxClockSkewMs, sonst FutureTimestampsError (siehe sync/sync.ts).
+   */
   maxClockSkewMs: number;
   backupsToKeep: number;
 }
@@ -256,7 +330,7 @@ export interface SyncResult {
   report?: MergeReport;
   /**
    * Hinweise, die den Abgleich nicht verhindert haben, z. B. „alte Sicherungskopie ließ sich
-   * nicht löschen“ (siehe StorageAdapter.backup). Fehlt, wenn es keine gibt. Optional, damit
+   * nicht löschen“ (siehe StorageAdapter.pruneBackups). Fehlt, wenn es keine gibt. Optional, damit
    * bestehende Aufrufer und Tests unverändert gültig bleiben (Ergänzung vom 2026-10-16).
    */
   warnings?: string[];

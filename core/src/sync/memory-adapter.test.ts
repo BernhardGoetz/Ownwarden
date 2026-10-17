@@ -58,14 +58,28 @@ describe("InMemoryAdapter: verhält sich wie ein guter WebDAV-Server", () => {
     expect(file.etag).toBe("");
   });
 
-  it("backup behält die neuesten `keep`; nextBackupError schlägt einmal fehl", async () => {
+  // Seit Review xc-1: backup() löscht nichts und sichert jede Fassung nur einmal; aufgeräumt
+  // wird getrennt mit pruneBackups() (bisher behielt backup() selbst nur die neuesten `keep`).
+  it("backup sichert jede Fassung einmal; pruneBackups behält die neuesten `keep`; nextBackupError schlägt einmal fehl", async () => {
     const adapter = new InMemoryAdapter();
-    for (let i = 1; i <= 4; i++) await adapter.backup({ data: bytes(`v${i}`), etag: `"${i}"` }, 2);
-    expect(adapter.storage.backups.map((backup) => new TextDecoder().decode(backup.data))).toEqual(["v3", "v4"]);
+    const texts = () => adapter.storage.backups.map((backup) => new TextDecoder().decode(backup.data));
+    for (let i = 1; i <= 4; i++) await adapter.backup({ data: bytes(`v${i}`), etag: `"${i}"` });
+    await adapter.backup({ data: bytes("v4"), etag: '"4"' }); // dieselbe Fassung noch einmal
+    expect(texts()).toEqual(["v1", "v2", "v3", "v4"]);
+    expect(adapter.stats.backups).toBe(4);
+
+    await adapter.pruneBackups({ data: bytes("v4"), etag: '"4"' }, 2);
+    expect(texts()).toEqual(["v3", "v4"]);
+    // Die Sicherung der überschriebenen Fassung bleibt, auch wenn sie nicht die neueste ist.
+    await adapter.backup({ data: bytes("v5"), etag: '"5"' });
+    await adapter.pruneBackups({ data: bytes("v3"), etag: '"3"' }, 1);
+    expect(texts()).toEqual(["v3"]);
+    expect(adapter.stats.prunes).toBe(2);
+
     adapter.nextBackupError = new Error("kaputt");
-    await expect(adapter.backup({ data: bytes("v5"), etag: '"5"' }, 2)).rejects.toThrow("kaputt");
-    await adapter.backup({ data: bytes("v6"), etag: '"6"' }, 2);
-    expect(adapter.stats.backups).toBe(5);
-    await expect(adapter.backup({ data: bytes("x"), etag: '"x"' }, 0)).rejects.toBeInstanceOf(RangeError);
+    await expect(adapter.backup({ data: bytes("v6"), etag: '"6"' })).rejects.toThrow("kaputt");
+    await adapter.backup({ data: bytes("v7"), etag: '"7"' });
+    expect(adapter.stats.backups).toBe(6);
+    await expect(adapter.pruneBackups({ data: bytes("x"), etag: '"x"' }, 0)).rejects.toBeInstanceOf(RangeError);
   });
 });

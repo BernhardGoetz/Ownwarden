@@ -5,8 +5,8 @@
  *
  * Ablauf:
  *   1. Beide Bäume flach erfassen: UUID -> (Objekt, Elterngruppe, Reihenfolge).
- *      Doppelte UUIDs innerhalb EINER Datei (der XML-Leser erkennt sie nicht) werden dabei
- *      wie zwei Fassungen desselben Objekts zusammengeführt – es geht nichts verloren.
+ *      Doppelte UUIDs innerhalb EINER Datenbank sind ein Programmfehler (der KDBX-Leser vergibt
+ *      ihnen neue) – dann bricht mergeVaults ab, statt Objekte still zusammenzulegen.
  *   2. Einträge (über den ganzen Baum per UUID zugeordnet) Feld für Feld zusammenführen
  *      (merge-entry.ts), dann Löschen gegen Ändern: Ein Eintrag mit Lösch-Vermerk bleibt
  *      nur, wenn seine neueste Änderung (ganze Sekunden) NACH der Löschung liegt.
@@ -27,8 +27,8 @@
 import type { FieldConflict, FieldKey, MergeReport, MergeVaults } from "../contracts";
 import type { Entry, Group, Millis, Uuid, Vault } from "../model";
 import { cloneEntry, cloneGroupShallow, cloneSettings, deepEqual } from "./clone";
-import { compareText, isKdbxTime, toSeconds } from "./encoding";
-import { effectiveFieldTimes, newestFieldTime, sealFieldTimes, type FieldTime } from "./field-times";
+import { compareText, isKdbxTime, MAX_KDBX_TIME, toSeconds } from "./encoding";
+import { effectiveFieldTimes, justAfter, newestFieldTime, sealFieldTimes, type FieldTime } from "./field-times";
 import { LAST_MODIFIED_KEY, PARENT_FIELD } from "./fields";
 import { contentFingerprint } from "./history";
 import { mergeEntryVersions, type PlacedEntry } from "./merge-entry";
@@ -100,8 +100,8 @@ class VaultMerger {
     // Normalerweise haben beide Fassungen dieselbe Wurzel. Wenn nicht, gelten beide Wurzeln
     // als dieselbe Gruppe; ihre UUID im Ergebnis ist (unabhängig von der Seite) die kleinere.
     this.rootUuid = compareText(local.root.uuid, remote.root.uuid) <= 0 ? local.root.uuid : remote.root.uuid;
-    this.l = this.indexVault(local);
-    this.r = this.indexVault(remote);
+    this.l = this.indexVault(local, "local");
+    this.r = this.indexVault(remote, "remote");
     for (const deleted of [...local.deletedObjects, ...remote.deletedObjects]) {
       const known = this.deletions.get(deleted.uuid);
       if (known === undefined || deleted.deletionTime > known) this.deletions.set(deleted.uuid, deleted.deletionTime);
@@ -138,36 +138,40 @@ class VaultMerger {
   // 1. Flaches Verzeichnis
   // -------------------------------------------------------------------------
 
-  private indexVault(vault: Vault): VaultIndex {
+  /**
+   * Voraussetzung: Innerhalb EINER Datenbank sind die UUIDs aller Gruppen (mit Wurzel) und
+   * aller Einträge (ohne Verlauf) verschieden – Gruppen und Einträge teilen sich einen
+   * Namensraum. Der KDBX-Leser stellt das sicher (doppelte bekommen beim Lesen eine neue,
+   * abgeleitete UUID, kdbx/duplicate-uuids.ts); eine doppelte UUID hier ist also ein
+   * Programmfehler. Lieber abbrechen, als zwei Objekte still zu einem zusammenzulegen – dabei
+   * ginge eines samt Passwort verloren (Review kdbx-1).
+   */
+  private indexVault(vault: Vault, side: "local" | "remote"): VaultIndex {
     const index: VaultIndex = { entries: new Map(), groups: new Map(), childEntries: new Map(), childGroups: new Map() };
+    const seen = new Set<Uuid>([vault.root.uuid]);
+    const claim = (uuid: Uuid): void => {
+      if (seen.has(uuid)) {
+        throw new Error(`mergeVaults: Die UUID ${uuid} kommt in ${side} mehrfach vor (Gruppen und Einträge). Der KDBX-Leser vergibt doppelten UUIDs neue – das hier ist ein Programmfehler.`);
+      }
+      seen.add(uuid);
+    };
     let order = 0;
     const walk = (group: Group, groupUuid: Uuid): void => {
       for (const entry of group.entries) {
+        claim(entry.uuid);
         pushChild(index.childEntries, groupUuid, entry.uuid);
-        const placed = { entry, parent: groupUuid };
-        const existing = index.entries.get(entry.uuid);
-        if (existing === undefined) {
-          index.entries.set(entry.uuid, { ...placed, order: order++ });
-        } else {
-          // Doppelte UUID in derselben Datei: wie zwei Fassungen zusammenführen.
-          const merged = mergeEntryVersions(existing, placed, this.local.meta);
-          index.entries.set(entry.uuid, { entry: merged.entry, parent: merged.parent, order: existing.order });
-        }
+        index.entries.set(entry.uuid, { entry, parent: groupUuid, order: order++ });
       }
       for (const child of group.groups) {
-        // Eine Untergruppe mit der UUID der Wurzel wird Teil der Wurzel (sonst Zyklus).
-        if (child.uuid === vault.root.uuid || child.uuid === this.rootUuid) {
+        claim(child.uuid);
+        // Eine Untergruppe mit der Wurzel-UUID der ANDEREN Seite (verschiedene Wurzeln, siehe
+        // Konstruktor) wird Teil der Wurzel (sonst Zyklus).
+        if (child.uuid === this.rootUuid) {
           walk(child, this.rootUuid);
           continue;
         }
         pushChild(index.childGroups, groupUuid, child.uuid);
-        const placed = { group: child, parent: groupUuid };
-        const existing = index.groups.get(child.uuid);
-        if (existing === undefined) {
-          index.groups.set(child.uuid, { ...placed, order: order++ });
-        } else {
-          index.groups.set(child.uuid, { ...mergeGroupVersions(existing, placed), order: existing.order });
-        }
+        index.groups.set(child.uuid, { group: child, parent: groupUuid, order: order++ });
         walk(child, child.uuid);
       }
     };
@@ -281,14 +285,14 @@ class VaultMerger {
   private relocateGroup(uuid: Uuid, parent: Uuid): void {
     const placed = this.groups.get(uuid)!;
     placed.parent = parent;
-    const nextSecond = (toSeconds(placed.group.times.locationChanged) + 1) * 1000;
+    const nextSecond = nextWholeSecond(placed.group.times.locationChanged);
     placed.group.times = { ...placed.group.times, locationChanged: Math.max(this.now, nextSecond) };
   }
 
   /** Wie relocateGroup, für einen Eintrag (Feld "parent" bekommt die neue Zeit, neu versiegelt). */
   private relocateEntry(item: ResultEntry, parent: Uuid): void {
     const previous = item.times.get(PARENT_FIELD)?.t ?? item.entry.times.locationChanged;
-    const time = Math.max(this.now, previous + 1);
+    const time = Math.max(this.now, justAfter(previous));
     item.parent = parent;
     item.entry.times = {
       ...item.entry.times,
@@ -349,7 +353,7 @@ class VaultMerger {
     if (!this.groups.has(RECOVERY_GROUP_UUID)) {
       // Neu anlegen (bzw. wieder anlegen, falls sie früher gelöscht wurde: dann nach der Löschung).
       const deletedAt = this.deletions.get(RECOVERY_GROUP_UUID);
-      const time = Math.max(this.now, deletedAt === undefined ? -Infinity : (toSeconds(deletedAt) + 1) * 1000);
+      const time = Math.max(this.now, deletedAt === undefined ? -Infinity : nextWholeSecond(deletedAt));
       this.groups.set(RECOVERY_GROUP_UUID, { group: recoveryGroup(time), parent: this.rootUuid });
     }
     for (const uuid of orphanGroups) {
@@ -465,6 +469,14 @@ class VaultMerger {
 /** Neueste Änderung eines Eintrags: neuester Feld-Zeitstempel, Änderungs- oder Verschiebezeit. */
 function entryChangeTime(item: ResultEntry): Millis {
   return Math.max(newestFieldTime(item.times), item.entry.times.lastModification, item.entry.times.locationChanged);
+}
+
+/**
+ * Beginn der ganzen Sekunde nach `time` – höchstens MAX_KDBX_TIME (Jahr 9999): Eine spätere
+ * Zeit ließe sich nicht speichern.
+ */
+function nextWholeSecond(time: Millis): Millis {
+  return Math.min((toSeconds(time) + 1) * 1000, MAX_KDBX_TIME);
 }
 
 /** Neueste Änderung einer Gruppe (Eigenschaften oder Verschiebung). */

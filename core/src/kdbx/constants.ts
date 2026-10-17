@@ -170,8 +170,18 @@ export const KDF_LIMITS = {
    * Warum dieser Wert: hash-wasm schafft (Node 22, gemessen 2026-10) etwa 450–700 KiB×It
    * pro ms; 2^25 sind also rund eine Minute – so lange wie die schlimmste erlaubte AES-KDF
    * (INT_MAX-1 Runden, ~85 s, blockiert aber nicht). Erlaubt bleiben z. B. 64 MiB × 512
-   * Iterationen (KeePassXC mit 5 s Entschlüsselungszeit auf einem schnellen PC), 1 GiB × 32,
-   * 1 MiB × 32768. Ownwardens Standard (64 MiB × 3) nutzt weniger als 1 % davon.
+   * Iterationen, 1 GiB × 32, 1 MiB × 32768. Ownwardens Standard (64 MiB × 3) nutzt weniger
+   * als 1 % davon.
+   *
+   * Achtung bei Einstellungen, die in KeePassXC geändert wurden: KeePassXC misst die gewählte
+   * Entschlüsselungszeit MIT allen Threads (Parallelität = Anzahl der Threads des PCs),
+   * hash-wasm rechnet alle Spuren nacheinander auf EINEM Thread. Was in KeePassXC N Sekunden
+   * dauert, dauert hier also bis zu „Parallelität × N“ Sekunden, und auf einem PC mit vielen
+   * Threads kann schon „5 s“ bei 64 MiB mehr als 512 Iterationen ergeben – dann lehnt
+   * readKdbx die Datei mit UnsupportedKdf ab (siehe core/README.md, „Bekannte Grenzen“).
+   * Gemessen 2026-10 auf einer VM mit 4 vCPUs, Argon2id mit 64 MiB: libargon2 von KeePassXC
+   * 48,5 ms je Iteration bei P=1 und 19,2 ms bei P=4 (also „5 s“ ≈ 260 Iterationen),
+   * hash-wasm 75 ms (512 Iterationen ≈ 38 s).
    */
   maxArgon2WorkKiBIterations: 2 ** 25,
 } as const;

@@ -16,10 +16,13 @@
  */
 import { FIELD_TIMES_KEY } from "../contracts";
 import type { CustomData, Entry, Group, Millis, Vault } from "../model";
-import { isKdbxTime } from "./encoding";
+import { isKdbxTime, MAX_KDBX_TIME } from "./encoding";
 
 export interface MonotonicClock {
-  /** Nächster Zeitstempel (ms); jeder Aufruf liefert einen größeren Wert als alle vorherigen. */
+  /**
+   * Nächster Zeitstempel (ms); jeder Aufruf liefert einen größeren Wert als alle vorherigen –
+   * außer am Ende des KDBX-Zeitbereichs: Dort bleibt die Uhr bei MAX_KDBX_TIME stehen.
+   */
   now(): Millis;
   /** Meldet einen bekannten Zeitstempel: Künftige now()-Werte liegen darüber. */
   observe(time: Millis): void;
@@ -27,7 +30,7 @@ export interface MonotonicClock {
 
 /** Uhr, die eine Datenbank kennt. Zeitquelle standardmäßig Date.now. */
 export class VaultClock implements MonotonicClock {
-  /** Kleinster Wert, den now() als Nächstes liefern darf. */
+  /** Kleinster Wert, den now() als Nächstes liefern darf (nie mehr als MAX_KDBX_TIME). */
   private floor = -Infinity;
 
   constructor(
@@ -37,20 +40,27 @@ export class VaultClock implements MonotonicClock {
     if (vault !== undefined) this.observeVault(vault);
   }
 
+  /**
+   * Nie später als MAX_KDBX_TIME (Jahr 9999): Eine spätere Zeit ließe sich nicht speichern,
+   * und in Ownwarden.FieldTimes machte sie die ganzen FieldTimes des Eintrags ungültig (der
+   * Eintrag verlöre still alle Lösch-Marker). Lieber am Ende stehen bleiben – dann entscheidet
+   * bei gleicher Zeit die feste Gleichstand-Regel.
+   */
   now(): Millis {
-    const time = Math.max(Math.floor(this.timeSource()), this.floor);
-    this.floor = time + 1;
+    const time = Math.min(Math.max(Math.floor(this.timeSource()), this.floor), MAX_KDBX_TIME);
+    this.floor = Math.min(time + 1, MAX_KDBX_TIME);
     return time;
   }
 
   /**
    * Zeiten außerhalb des KDBX-Bereichs (Jahr 1 bis 9999, z. B. aus kaputten FieldTimes) werden
    * ignoriert: Sonst lieferte die Uhr danach nur noch Zeiten, die sich nicht speichern lassen,
-   * und ab 2^53 nicht einmal mehr steigende.
+   * und ab 2^53 nicht einmal mehr steigende. Eine Zeit genau am Ende des Bereichs schiebt die
+   * Uhr nur bis MAX_KDBX_TIME (siehe now).
    */
   observe(time: Millis): void {
     const whole = Math.floor(time);
-    if (isKdbxTime(whole)) this.floor = Math.max(this.floor, whole + 1);
+    if (isKdbxTime(whole)) this.floor = Math.max(this.floor, Math.min(whole + 1, MAX_KDBX_TIME));
   }
 
   /** Meldet alle relevanten Zeitstempel einer Datenbank (z. B. nach dem Zusammenführen). */

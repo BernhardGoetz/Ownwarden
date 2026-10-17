@@ -6,6 +6,7 @@ import {
   asBufferSource,
   bytesEqual,
   bytesToUuid,
+  concatByteArrays,
   concatBytes,
   toHex,
   u32le,
@@ -97,6 +98,19 @@ describe("Hilfsfunktionen", () => {
     expect(bytesEqual(Uint8Array.of(1, 2), Uint8Array.of(1, 2))).toBe(true);
     expect(bytesEqual(Uint8Array.of(1, 2), Uint8Array.of(1, 3))).toBe(false);
     expect(bytesEqual(Uint8Array.of(1, 2), Uint8Array.of(1))).toBe(false);
+  });
+
+  // Review kdbx-7: Mit `concatBytes(...teile)` scheiterte das ab ~120 000 Teilen mit
+  // „Maximum call stack size exceeded“ (z. B. ~30 000 Anhänge im inneren Header).
+  it("concatByteArrays und ByteWriter verkraften 200 000 Teile", () => {
+    const parts = Array.from({ length: 200_000 }, (_, i) => Uint8Array.of(i & 0xff));
+    const joined = concatByteArrays(parts);
+    expect(joined.length).toBe(200_000);
+    expect([joined[0], joined[255], joined[256], joined[199_999]]).toEqual([0, 255, 0, 199_999 & 0xff]);
+
+    const writer = new ByteWriter();
+    for (const part of parts) writer.writeBytes(part);
+    expect(bytesEqual(writer.toBytes(), joined)).toBe(true);
   });
 
   it("UTF-8 hin und zurück", () => {

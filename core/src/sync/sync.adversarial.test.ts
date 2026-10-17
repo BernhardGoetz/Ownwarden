@@ -9,6 +9,8 @@
  *      ETag, gleiche Bytes), nach dem letzten Lesen.
  *   3. Keine Änderung geht verloren: Am Ende hat jedes Feld den Wert der zeitlich letzten
  *      Änderung, auf allen Geräten und auf dem Server; danach schreibt keiner mehr (kein Ping-Pong).
+ *   4. Alte Sicherungen werden nur nach einem ERFOLGREICHEN Schreiben über genau die gelesene
+ *      Fassung aufgeräumt (pruneBackups, Review xc-1).
  */
 import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -54,6 +56,8 @@ class CheckingAdapter implements StorageAdapter {
   readonly violations: string[] = [];
   private lastRead: RemoteFile | null | undefined;
   private backupsSinceRead: RemoteFile[] = [];
+  /** Die zuletzt erfolgreich (mit If-Match) überschriebene Fassung. */
+  private lastWritten: RemoteFile | undefined;
 
   constructor(readonly inner: InMemoryAdapter) {}
 
@@ -68,9 +72,15 @@ class CheckingAdapter implements StorageAdapter {
     return file;
   }
 
-  async backup(current: RemoteFile, keep: number): Promise<void> {
-    await this.inner.backup(current, keep);
+  async backup(current: RemoteFile): Promise<void> {
+    await this.inner.backup(current);
     this.backupsSinceRead.push({ ...current, data: current.data.slice() });
+  }
+
+  async pruneBackups(current: RemoteFile, keep: number): Promise<void> {
+    // Aufräumen nur nach einem erfolgreichen Schreiben genau dieser gelesenen Fassung (Review xc-1).
+    if (this.lastWritten?.etag !== current.etag) this.violations.push(`Aufräumen ohne erfolgreiches Schreiben über ${current.etag}`);
+    await this.inner.pruneBackups(current, keep);
   }
 
   async write(data: Uint8Array, condition: WriteCondition): Promise<{ etag: string | null; serverDate?: Millis }> {
@@ -86,7 +96,10 @@ class CheckingAdapter implements StorageAdapter {
     }
     // Nach einem Schreibversuch muss neu gelesen werden, bevor erneut geschrieben wird.
     this.lastRead = undefined;
-    return this.inner.write(data, condition);
+    this.lastWritten = undefined;
+    const result = await this.inner.write(data, condition);
+    if (read !== undefined && read !== null) this.lastWritten = read;
+    return result;
   }
 }
 

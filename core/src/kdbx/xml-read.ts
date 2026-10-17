@@ -13,6 +13,8 @@
  *     XML-Text in `unknown` aufbewahrt (geschützte Werte darin im Klartext mit
  *     Protected="True"), damit beim Speichern nichts verloren geht.
  *   - Fehlermeldungen nennen Elementnamen, Feldnamen und UUIDs, aber nie Feldinhalte.
+ *   - Doppelte UUIDs von Gruppen/Einträgen: Das spätere Vorkommen bekommt eine neue,
+ *     abgeleitete UUID (duplicate-uuids.ts), damit beim Zusammenführen nichts verloren geht.
  *
  * Elementnamen abgeglichen mit KeePassXC 2.7.6 (src/format/KdbxXmlReader.cpp).
  */
@@ -33,6 +35,7 @@ import {
   type Vault,
 } from "../model";
 import { bytesEqual, corrupt } from "./bytes";
+import { repairDuplicateUuids, type UuidOwner } from "./duplicate-uuids";
 import { childElements, plainText, serializeElement, type XmlElement } from "./xml-dom";
 import { isProtectedElement } from "./xml-protected";
 import {
@@ -166,6 +169,38 @@ export function readVault(document: XmlElement, settings: KdbxSettings, context:
   return new VaultReader(context).readKeePassFile(document, settings);
 }
 
+/**
+ * Gruppen und Einträge (ohne Verlaufseinträge) in Dokumentreihenfolge. Das Modell trennt
+ * Einträge und Untergruppen einer Gruppe; die Reihenfolge untereinander steht nur im XML.
+ * `group` ist die aus `element` gelesene Gruppe: Ihre Einträge und Untergruppen stehen in
+ * derselben Reihenfolge wie die <Entry>- bzw. <Group>-Kinder von `element`.
+ */
+function ownersInDocumentOrder(element: XmlElement, group: Group): UuidOwner[] {
+  const owners: UuidOwner[] = [];
+  const visit = (groupElement: XmlElement, current: Group): void => {
+    owners.push({ kind: "group", group: current });
+    let entryIndex = 0;
+    let groupIndex = 0;
+    for (const child of childElements(groupElement)) {
+      if (child.name === "Entry") owners.push({ kind: "entry", entry: current.entries[entryIndex++]! });
+      else if (child.name === "Group") visit(child, current.groups[groupIndex++]!);
+    }
+  };
+  visit(element, group);
+  return owners;
+}
+
+/** Alle UUIDs der Datei außer denen von Gruppen und Einträgen: Verlaufseinträge, DeletedObjects. */
+function otherUuids(vault: Vault): Uuid[] {
+  const uuids = vault.deletedObjects.map((deleted) => deleted.uuid);
+  const visit = (group: Group): void => {
+    for (const entry of group.entries) for (const item of entry.history) uuids.push(item.uuid);
+    group.groups.forEach(visit);
+  };
+  visit(vault.root);
+  return uuids;
+}
+
 class VaultReader {
   constructor(private readonly context: ReadContext) {}
 
@@ -185,13 +220,16 @@ class VaultReader {
     if (groupElement === undefined) corrupt("Root: Die Wurzelgruppe fehlt.");
     const deletedObjectsElement = root.optional("DeletedObjects");
 
-    return {
+    const vault: Vault = {
       settings,
       meta: this.readMeta(metaElement),
       root: this.readGroup(groupElement),
       deletedObjects: deletedObjectsElement ? this.readDeletedObjects(deletedObjectsElement) : [],
       rootUnknown: this.unknownToStrings(root.unknown),
     };
+    // Erst wenn ALLES gelesen ist: Alle UUIDs der Datei müssen bekannt sein (Review kdbx-1).
+    repairDuplicateUuids(ownersInDocumentOrder(groupElement, vault.root), otherUuids(vault));
+    return vault;
   }
 
   private readMeta(element: XmlElement | undefined): Meta {

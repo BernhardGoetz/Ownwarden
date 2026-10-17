@@ -18,7 +18,7 @@ import { parseVaultXml, serializeVaultXml } from "../kdbx/xml";
 import type { Entry, Millis, Vault } from "../model";
 import { cloneVault } from "./clone";
 import { VaultClock } from "./clock";
-import { encodeParts, fingerprint } from "./encoding";
+import { encodeParts, fingerprint, MAX_KDBX_TIME } from "./encoding";
 import { effectiveFieldTimes, readFieldTimes, sealFieldTimes } from "./field-times";
 import { normalizeTags } from "./fields";
 import { contentFingerprint, historySnapshot } from "./history";
@@ -264,29 +264,45 @@ describe("Plattformunabhängige Vereinheitlichung", () => {
 });
 
 describe("Reine Funktion", () => {
-  it("doppelte UUIDs in EINER Datei (Eintrag, Gruppe, Wurzel-UUID als Untergruppe): Eingaben unverändert, beide Richtungen gleich", () => {
+  it("doppelte UUIDs in EINER Datenbank (Eintrag, Gruppe, Wurzel-UUID als Untergruppe, Eintrag = Gruppe): Abbruch in beiden Richtungen, Eingaben unverändert", () => {
+    // Früher wurden doppelte Vorkommen still zusammengeführt (dabei konnte eines samt Passwort
+    // verloren gehen, Review kdbx-1). Der KDBX-Leser vergibt ihnen jetzt neue UUIDs; kommt
+    // trotzdem eine doppelte an, ist das ein Programmfehler und mergeVaults bricht ab.
     const dupEntry = (at: Millis, password: string) => {
       const entry = newEntry({ uuid: u("dup"), at, fields: { Title: "D", Password: password } });
       sealFieldTimes(entry, new Map(), u("root"));
       return entry;
     };
-    const g1 = newGroup({ uuid: u("g"), name: "G alt", at: T0, entries: [dupEntry(T0 + 1000, "eins")] });
-    const g2 = newGroup({ uuid: u("g"), name: "G neu", at: T0 + 5000, entries: [dupEntry(T0 + 2000, "zwei")] });
-    const fakeRoot = newGroup({ uuid: u("root"), name: "falsche Wurzel", at: T0, entries: [newEntry({ uuid: u("in-falscher-wurzel"), at: T0 })] });
-    const a = newVault({ root: newGroup({ uuid: u("root"), at: T0, groups: [g1, g2, fakeRoot] }) });
-    const b = newVault({ root: newGroup({ uuid: u("root"), at: T0, entries: [dupEntry(T0 + 500, "null")] }) });
-    const aBefore = cloneVault(a);
-    const bBefore = cloneVault(b);
+    const broken = [
+      newVault({
+        root: newGroup({ uuid: u("root"), at: T0, groups: [newGroup({ uuid: u("g"), at: T0, entries: [dupEntry(T0 + 1000, "eins")] })], entries: [dupEntry(T0 + 2000, "zwei")] }),
+      }),
+      newVault({ root: newGroup({ uuid: u("root"), at: T0, groups: [newGroup({ uuid: u("g"), name: "G alt", at: T0 }), newGroup({ uuid: u("g"), name: "G neu", at: T0 + 5000 })] }) }),
+      newVault({ root: newGroup({ uuid: u("root"), at: T0, groups: [newGroup({ uuid: u("root"), name: "falsche Wurzel", at: T0 })] }) }),
+      newVault({ root: newGroup({ uuid: u("root"), at: T0, groups: [newGroup({ uuid: u("dup"), at: T0 })], entries: [dupEntry(T0, "x")] }) }),
+    ];
+    const fine = newVault({ root: newGroup({ uuid: u("root"), at: T0, entries: [dupEntry(T0 + 500, "null")] }) });
+    for (const a of broken) {
+      const aBefore = cloneVault(a);
+      expect(() => mergeVaults(a, fine, { now: NOW })).toThrow(/mehrfach/);
+      expect(() => mergeVaults(fine, a, { now: NOW })).toThrow(/mehrfach/);
+      expect(a).toEqual(aBefore);
+    }
+  });
 
+  it("Untergruppe mit der Wurzel-UUID der ANDEREN Seite: wird Teil der Wurzel, beide Richtungen gleich", () => {
+    // Verschiedene Wurzeln: Das Ergebnis hat die kleinere UUID; bei der anderen Seite ist sie eine Untergruppe.
+    const [small, big] = [u("root"), u("andere")].sort() as [string, string];
+    const a = newVault({ root: newGroup({ uuid: small, at: T0, entries: [newEntry({ uuid: u("e1"), at: T0, fields: { Title: "A" } })] }) });
+    const b = newVault({
+      root: newGroup({ uuid: big, at: T0, groups: [newGroup({ uuid: small, at: T0, entries: [newEntry({ uuid: u("e2"), at: T0, fields: { Title: "B" } })] })] }),
+    });
     const ab = mergeVaults(a, b, { now: NOW }).vault;
     const ba = mergeVaults(b, a, { now: NOW }).vault;
-    expect(a).toEqual(aBefore);
-    expect(b).toEqual(bBefore);
     expect(semanticView(ba)).toEqual(semanticView(ab));
-    expect(findEntry(ab, u("dup"))!.strings.get("Password")!.value).toBe("zwei");
-    expect(findGroup(ab, u("g"))!.name).toBe("G neu");
-    expect(findEntry(ab, u("in-falscher-wurzel"))).toBeDefined();
-    expect(ab.root.groups.map((g) => g.uuid)).toEqual([u("g")]);
+    expect(ab.root.uuid).toBe(small);
+    expect(ab.root.groups).toEqual([]);
+    expect(ab.root.entries.map((e) => e.uuid).sort()).toEqual([u("e1"), u("e2")].sort());
   });
 });
 
@@ -388,5 +404,62 @@ describe("Unsinnige Zeiten in Ownwarden.FieldTimes", () => {
     const effective = effectiveFieldTimes(garbage, u("root"));
     expect(effective.sealed).toBe(false);
     expect(effective.times.get("s:Title")).toEqual({ t: T0 + 7000, present: true });
+  });
+
+  describe("Zeiten am Ende des KDBX-Bereichs (Review merge-4)", () => {
+    /** Alle Zeiten "t" und "w" in Ownwarden.FieldTimes eines Eintrags (wirft, wenn sie fehlen). */
+    function storedTimes(entry: Entry): number[] {
+      const stored = readFieldTimes(entry);
+      expect(stored, "FieldTimes gültig").toBeDefined();
+      return [stored!.sealedAt, ...[...stored!.fields.values()].map((field) => field.t)];
+    }
+
+    it("die Uhr bleibt bei MAX_KDBX_TIME stehen statt dahinter zu laufen", () => {
+      const clock = new VaultClock(undefined, () => T0);
+      clock.observe(MAX_KDBX_TIME);
+      expect(clock.now()).toBe(MAX_KDBX_TIME);
+      expect(clock.now()).toBe(MAX_KDBX_TIME);
+      expect(new VaultClock(undefined, () => MAX_KDBX_TIME + 5000).now()).toBe(MAX_KDBX_TIME);
+    });
+
+    it("eine Änderung nach einem Feld-Zeitstempel von Jahr 9999 schreibt lesbare FieldTimes", () => {
+      const vault = newVault({ root: newGroup({ uuid: u("root"), at: T0, entries: [entryClaiming(MAX_KDBX_TIME, "Ende", T0)] }) });
+      const entry = setField(vault, u("e1"), "UserName", "alice", {}, new VaultClock(vault, () => T0 + 50_000));
+      expect(Math.max(...storedTimes(entry))).toBe(MAX_KDBX_TIME);
+      expect(entry.times.lastModification).toBe(MAX_KDBX_TIME);
+      expect(() => saveAndLoad(vault)).not.toThrow();
+    });
+
+    it("extern geändert nach t = MAX_KDBX_TIME: wirksame Zeit bleibt im Bereich, das Ergebnis lesbar", () => {
+      const changed = entryClaiming(MAX_KDBX_TIME, "Ende", T0);
+      changed.strings.set("Title", { value: "extern", protected: false }); // Fingerabdruck passt nicht mehr
+      expect(effectiveFieldTimes(changed, u("root")).times.get("s:Title")).toEqual({ t: MAX_KDBX_TIME, present: true });
+      const a = newVault({ root: newGroup({ uuid: u("root"), at: T0, entries: [changed] }) });
+      const b = newVault({ root: newGroup({ uuid: u("root"), at: T0, entries: [newEntry({ uuid: u("e1"), at: T0 + 5000, fields: { Title: "neu" } })] }) });
+      const merged = findEntry(mergeVaults(a, b, { now: NOW }).vault, u("e1"))!;
+      expect(merged.strings.get("Title")!.value).toBe("extern");
+      expect(Math.max(...storedTimes(merged))).toBe(MAX_KDBX_TIME);
+    });
+
+    it("Verschiebung durch den Merge (Waise) nach Zeiten von Jahr 9999: alles bleibt speicherbar und lesbar", () => {
+      const orphan = newEntry({ uuid: u("waise"), at: T0, fields: { Title: "Waise" } });
+      sealFieldTimes(orphan, new Map([["parent", { t: MAX_KDBX_TIME, present: true }]]), u("weg"));
+      const lostGroup = newGroup({ uuid: u("verloren"), name: "Verloren", at: T0, times: { ...newGroup().times, locationChanged: MAX_KDBX_TIME } });
+      const doomed = newGroup({ uuid: u("weg"), name: "Weg", at: T0, entries: [orphan], groups: [lostGroup] });
+      const a = newVault({ root: newGroup({ uuid: u("root"), at: T0, groups: [doomed] }) });
+      // Gelöscht in derselben (letzten) Sekunde: Die Löschung gewinnt, Eintrag und Untergruppe sind Waisen.
+      const b = newVault({ root: newGroup({ uuid: u("root"), at: T0 }), deletedObjects: [{ uuid: u("weg"), deletionTime: MAX_KDBX_TIME }] });
+      const { vault, report } = mergeVaults(a, b, { now: NOW });
+      expect(report.orphansRecovered).toBe(2);
+      expect(Math.max(...storedTimes(findEntry(vault, u("waise"))!))).toBe(MAX_KDBX_TIME);
+      expect(findGroup(vault, u("verloren"))!.times.locationChanged).toBe(MAX_KDBX_TIME);
+      expect(() => saveAndLoad(vault)).not.toThrow();
+    });
+
+    it("sealFieldTimes schreibt keine Zeit außerhalb des KDBX-Bereichs", () => {
+      const entry = newEntry({ uuid: u("e1"), at: T0, fields: { Title: "x" } });
+      expect(() => sealFieldTimes(entry, new Map([["s:Title", { t: MAX_KDBX_TIME + 1, present: true }]]), u("root"))).toThrow(RangeError);
+      expect(entry.customData.has(FIELD_TIMES_KEY)).toBe(false);
+    });
   });
 });

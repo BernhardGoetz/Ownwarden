@@ -286,10 +286,22 @@ export function randomScenario(seed: number): Scenario {
 const hex = (bytes: Uint8Array): string => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 /**
+ * Eine Verlaufsfassung mit ALLEN Rohdaten (auch Rohwerten nicht vorhandener Felder wie dem
+ * Standard-<AutoType>), nur ohne Map-Reihenfolge. Sonst sähen die Tests nicht, wenn zwei
+ * Geräte verschiedene Rohfassungen desselben Verlaufseintrags behalten und sich deshalb bei
+ * jedem Abgleich gegenseitig ihre Fassung zurückschreiben (Review merge-1).
+ */
+function rawHistoryItem(item: Entry): unknown {
+  const sorted = <T>(map: Map<string, T>): [string, T][] => [...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { ...item, strings: sorted(item.strings), customData: sorted(item.customData), history: item.history.length };
+}
+
+/**
  * Inhalt einer Datenbank ohne Reihenfolge der Geschwister und ohne Rohdaten-Kleinkram, der
  * nach den Regeln keine Bedeutung hat (FieldTimes-Text, _LAST_MODIFIED, Map-Reihenfolge):
  * Gruppen und Einträge nach UUID sortiert, Felder kanonisch UND exakt, wirksame
- * Feld-Zeitstempel, Zeiten, Verlauf (Zeit + Inhalts-Fingerabdruck), Lösch-Vermerke.
+ * Feld-Zeitstempel, Zeiten, Verlauf (Zeit, Inhalts-Fingerabdruck und alle Rohdaten),
+ * Lösch-Vermerke.
  */
 export function semanticView(vault: Vault): unknown {
   const groups: unknown[] = [];
@@ -311,7 +323,7 @@ export function semanticView(vault: Vault): unknown {
         times: Object.fromEntries([...effective.times].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, [v.t, v.present]])),
         entryTimes: entry.times,
         tags: normalizeTags(entry.tags),
-        history: entry.history.map((item) => [item.times.lastModification, contentFingerprint(item)]),
+        history: entry.history.map((item) => [item.times.lastModification, contentFingerprint(item), rawHistoryItem(item)]),
         lastModifiedMarker: entry.customData.has(LAST_MODIFIED_KEY),
       });
     }

@@ -443,7 +443,13 @@ function describeEntry(entry: Entry, parent: Uuid, template: SpecEntry | undefin
     described.sealed = entry.customData.has(FIELD_TIMES_KEY);
   }
   if (template?.history !== undefined) {
-    described.history = entry.history.map((item) => ({ lastModification: item.times.lastModification, fields: describeContent(item, names).fields }));
+    const expectedHistory = template.history;
+    described.history = entry.history.map((item, i) => ({
+      lastModification: item.times.lastModification,
+      fields: describeContent(item, names).fields,
+      // Nennt die Erwartung unbekannte Elemente, zählen sie ROH (auch das Standard-AutoType).
+      ...(expectedHistory[i]?.unknown !== undefined ? { unknown: item.unknown } : {}),
+    }));
   }
   return described;
 }
@@ -473,7 +479,11 @@ export function describeExpected(expected: SpecVault): Described {
       described.sealed = true;
     }
     if (e.history !== undefined) {
-      described.history = e.history.map((item) => ({ lastModification: item.lastModification, fields: withoutEmptyStandard(item.fields ?? {}) }));
+      described.history = e.history.map((item) => ({
+        lastModification: item.lastModification,
+        fields: withoutEmptyStandard(item.fields ?? {}),
+        ...(item.unknown !== undefined ? { unknown: item.unknown } : {}),
+      }));
     }
     entries[e.uuid] = described;
   }

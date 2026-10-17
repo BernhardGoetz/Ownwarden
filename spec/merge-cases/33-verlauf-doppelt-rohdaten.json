@@ -1,0 +1,95 @@
+{
+  "name": "33-verlauf-doppelt-rohdaten",
+  "description": "Derselbe Verlaufseintrag (gleiche Sekunde, gleicher Inhalt) liegt auf beiden Seiten, aber remote hat ihn mit dem Standard-<AutoType>, das KeePassXC 2.7.6 beim Speichern auch in Verlaufseinträge schreibt. Das Standard-AutoType zählt nicht als Inhalt (misc bleibt nicht vorhanden) und steckt deshalb auch nicht im Rohdaten-Fingerabdruck. Welche Fassung bleibt, entscheidet dann die vollständige Kodierung aller Rohdaten (spec/README.md, Abschnitt 5.1) – in beiden Richtungen dieselbe, hier die mit AutoType. Sonst behielte jedes Gerät seine eigene Fassung und lüde sie bei jedem Abgleich wieder hoch.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000005000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {},
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000005000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "fieldTimes": {},
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            },
+            "protected": [
+              "Password"
+            ],
+            "unknown": [
+              "<AutoType><Enabled>True</Enabled><DataTransferObfuscation>0</DataTransferObfuscation><DefaultSequence/></AutoType>"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "fields": {
+          "Title": "Mail",
+          "Password": "neu"
+        },
+        "protected": [
+          "Password"
+        ],
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Mail",
+              "Password": "alt"
+            },
+            "unknown": [
+              "<AutoType><Enabled>True</Enabled><DataTransferObfuscation>0</DataTransferObfuscation><DefaultSequence/></AutoType>"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "fieldConflicts": []
+  }
+}

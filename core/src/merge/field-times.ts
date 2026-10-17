@@ -22,7 +22,7 @@
  */
 import { FIELD_TIMES_KEY, type FieldKey } from "../contracts";
 import type { Entry, Millis, Uuid } from "../model";
-import { compareText, fingerprint, isKdbxTime, sameBytes, toSeconds } from "./encoding";
+import { compareText, fingerprint, isKdbxTime, MAX_KDBX_TIME, sameBytes, toSeconds } from "./encoding";
 import { entryFields, fieldKind, IGNORED_CUSTOM_DATA_KEYS, isPasskeyAttribute, PARENT_FIELD, type FieldValue } from "./fields";
 
 /** Zeitpunkt eines Felds: vorhanden (geändert um t) oder entfernt (Lösch-Marker von t). */
@@ -125,6 +125,14 @@ function wholeSecond(millis: Millis): Millis {
 }
 
 /**
+ * Die Millisekunde nach `t` – höchstens MAX_KDBX_TIME. Eine Zeit hinter Jahr 9999 machte die
+ * FieldTimes beim nächsten Lesen ungültig (der Eintrag verlöre still alle Lösch-Marker).
+ */
+export function justAfter(t: Millis): Millis {
+  return Math.min(t + 1, MAX_KDBX_TIME);
+}
+
+/**
  * Basiszeit eines Felds: entry.times.lastModification, für "parent" locationChanged – auf
  * GANZE SEKUNDEN abgerundet (PROJECT-CONTEXT: KDBX-Zeiten werden beim Vergleich mit
  * Feld-Zeitstempeln auf Sekunden abgerundet). Sonst bekäme dasselbe Feld im Speicher (ms)
@@ -168,7 +176,7 @@ export function effectiveFieldTimes(entry: Entry, parentUuid?: Uuid): EffectiveF
     if (record !== undefined && !record.deleted && record.hash === fingerprint(value.canonical)) {
       times.set(key, { t: record.t, present: true });
     } else {
-      times.set(key, { t: record === undefined ? baseTime(key) : Math.max(baseTime(key), record.t + 1), present: true });
+      times.set(key, { t: record === undefined ? baseTime(key) : Math.max(baseTime(key), justAfter(record.t)), present: true });
       externalFields.push(key);
     }
   }
@@ -178,7 +186,7 @@ export function effectiveFieldTimes(entry: Entry, parentUuid?: Uuid): EffectiveF
     if (record.deleted) {
       times.set(key, { t: record.t, present: false });
     } else {
-      times.set(key, { t: Math.max(baseTime(key), record.t + 1), present: false });
+      times.set(key, { t: Math.max(baseTime(key), justAfter(record.t)), present: false });
       externalFields.push(key);
     }
   }
@@ -247,7 +255,8 @@ function sameValue(a: FieldValue | undefined, b: FieldValue): boolean {
  *
  * `times` liefert die Zeitpunkte. Fehlt darin ein vorhandenes Feld, gilt die Basiszeit
  * (lastModification bzw. locationChanged). Einträge mit present=true für ein Feld, das es
- * nicht (mehr) gibt, werden zu Lösch-Markern.
+ * nicht (mehr) gibt, werden zu Lösch-Markern. Wirft RangeError, wenn eine Zeit außerhalb des
+ * KDBX-Bereichs läge (Programmfehler).
  */
 export function sealFieldTimes(entry: Entry, times: ReadonlyMap<FieldKey, FieldTime>, parentUuid?: Uuid): void {
   const values = entryFields(entry, parentUuid);
@@ -260,6 +269,14 @@ export function sealFieldTimes(entry: Entry, times: ReadonlyMap<FieldKey, FieldT
     if (values.has(key) || !isTrackedKey(key)) continue;
     if (key === PARENT_FIELD && parentUuid === undefined) continue;
     if (Number.isFinite(time.t)) fields.set(key, { t: time.t, deleted: true });
+  }
+  // Jede geschriebene Zeit muss beim Lesen gültig sein (readFieldTimes): Sonst gälte der Eintrag
+  // danach still als nie versiegelt und verlöre alle Lösch-Marker. Lieber hier abbrechen.
+  for (const [key, field] of fields) {
+    if (!isKdbxTime(field.t)) throw new RangeError(`Ownwarden.FieldTimes: Zeit ${field.t} für ${key} liegt außerhalb des KDBX-Bereichs (Programmfehler).`);
+  }
+  if (!isKdbxTime(entry.times.lastModification)) {
+    throw new RangeError(`Ownwarden.FieldTimes: Änderungszeit ${entry.times.lastModification} liegt außerhalb des KDBX-Bereichs (Programmfehler).`);
   }
   entry.customData.set(FIELD_TIMES_KEY, {
     value: formatFieldTimes({ sealedAt: entry.times.lastModification, fields }),

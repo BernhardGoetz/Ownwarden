@@ -10,8 +10,10 @@
  *      Chromes bedingtem Schreiben gleicht Vivaldi ab. Chromes PUT bekommt 412, Chrome liest
  *      neu, führt neu zusammen und schreibt.
  *   3. Die Datei auf dem Server enthält ALLE Änderungen; KeePassXC öffnet sie und sieht sie.
- *      Sicherungskopien liegen bereit und wurden aufgeräumt (backupsToKeep = 2).
+ *      Sicherungskopien liegen bereit, jede Fassung nur einmal (backupsToKeep = 2).
  *   4. Ein drittes Gerät mit 10 Minuten falsch gehender Uhr: ClockSkewError, nichts geschrieben.
+ *   4a. Ein Gerät hat offline mit vorgehender Uhr bearbeitet und die Uhr vor dem Abgleich
+ *      gestellt: FutureTimestampsError, nichts geschrieben; nach restampFutureTimes klappt es.
  *   5. Ein Upload bricht mitten im PUT ab: Die Datei auf dem Server bleibt lesbar (alte
  *      Fassung), der nächste Abgleich klappt.
  *
@@ -33,13 +35,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTmpDir, exportKpxcAttachment, hasKeepassxc, listKpxc, removeTmpDir, showKpxcEntry } from "../helpers/keepassxc";
 import { TEST_KDF } from "../helpers/kdbx-files";
 import { startWebDavTestServer, webDavTestServerAvailable, type WebDavTestServer } from "../helpers/webdav-server";
-import { ClockSkewError, StorageError, type SyncOptions } from "../../src/contracts";
+import { ClockSkewError, FutureTimestampsError, StorageError, type SyncOptions } from "../../src/contracts";
 import { createNewVault, readKdbx } from "../../src/kdbx/index";
-import { createVaultClock } from "../../src/merge/clock";
+import { createVaultClock, latestVaultTime } from "../../src/merge/clock";
 import { mergeVaults } from "../../src/merge/merge";
 import { findEntry } from "../../src/merge/tree";
 import { createEntry, deleteEntry, setAttachment, setField } from "../../src/merge/vault-ops";
 import type { Uuid, Vault } from "../../src/model";
+import { restampFutureTimes } from "../../src/sync/future-times";
 import { createKdbxCodec } from "../../src/sync/kdbx-codec";
 import { DEFAULT_SYNC_SETTINGS, syncVault } from "../../src/sync/sync";
 import { WebDavAdapter } from "../../src/sync/webdav";
@@ -140,12 +143,14 @@ describe.skipIf(!webDavTestServerAvailable() || !hasKeepassxc())("Ende-zu-Ende: 
     expect(await showKpxcEntry(copy, PASSWORD, "Mail", { showProtected: true, attributes: ["UserName", "Password"] })).toBe("alice-chrome\nneu-vivaldi\n");
     expect(Buffer.from(await exportKpxcAttachment(copy, PASSWORD, "Mail", "rechnung.pdf")).equals(Buffer.from(RECHNUNG))).toBe(true);
 
-    // Sicherungen: drei angelegt (Chromes erster Versuch, Vivaldi, Chromes zweiter Versuch),
-    // eine davon aufgeräumt (backupsToKeep = 2). Jede Sicherung ist eine lesbare Tresor-Datei,
-    // und die zuletzt überschriebene Fassung (Vivaldis) ist dabei.
+    // Sicherungen: zwei angelegt – Chromes erster Versuch sicherte die Ausgangsfassung; Vivaldi
+    // fand diese Sicherung derselben Fassung vor und legte keine zweite an (Review xc-1: pro
+    // Fassung nur eine Kopie; bisher waren es hier 3 Kopien und 1 Löschung); Chromes zweiter
+    // Versuch sicherte Vivaldis Fassung. Nichts aufgeräumt (backupsToKeep = 2). Jede Sicherung
+    // ist eine lesbare Tresor-Datei, und die zuletzt überschriebene Fassung (Vivaldis) ist dabei.
     const copies = [...chromeLog, ...vivaldiLog].filter((line) => line.startsWith("COPY 2")).length;
     const deletes = [...chromeLog, ...vivaldiLog].filter((line) => line.startsWith("DELETE 2")).length;
-    expect({ copies, deletes }).toEqual({ copies: 3, deletes: 1 });
+    expect({ copies, deletes }).toEqual({ copies: 2, deletes: 0 });
     const backups = readdirSync(backupDir);
     expect(backups).toHaveLength(2);
     const backupVaults = await Promise.all(backups.map((name) => readKdbx(new Uint8Array(readFileSync(join(backupDir, name))), credentials)));
@@ -173,6 +178,37 @@ describe.skipIf(!webDavTestServerAvailable() || !hasKeepassxc())("Ende-zu-Ende: 
     expect(log).toEqual(["GET 200"]);
     expect(readFileSync(filePath).equals(before)).toBe(true);
     expect(readdirSync(backupDir).sort()).toEqual(backupsBefore);
+  });
+
+  // Review merge-2/sync-2: Der vorige Test verschiebt nur options.now; hier stammt die ÄNDERUNG
+  // selbst von der falsch gehenden Uhr, und beim Abgleich geht die Uhr wieder richtig.
+  it("offline mit vorgehender Uhr bearbeitet, Uhr danach gestellt: FutureTimestampsError, nichts geschrieben; Reparatur, dann Abgleich", async () => {
+    const before = readFileSync(filePath);
+    const backupsBefore = readdirSync(backupDir).sort();
+    const laptop = await readKdbx(new Uint8Array(before), credentials);
+    const oneYearAhead = () => Date.now() + 365 * 24 * 60 * 60 * 1000;
+    setField(laptop, uuids.mail, "URL", "https://falsche-uhr-offline.example", {}, createVaultClock(laptop, oneYearAhead));
+
+    const log: string[] = [];
+    const error = await syncVault(laptop, adapter(recordingFetch(log)), codec, options()).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(FutureTimestampsError);
+    expect((error as FutureTimestampsError).latestTime).toBeGreaterThan(Date.now() + 300 * 24 * 60 * 60 * 1000);
+    expect(String(error)).toMatch(/Zeitstempel aus der Zukunft.*nichts geschrieben/s);
+    expect(log).toEqual(["GET 200"]);
+    expect(readFileSync(filePath).equals(before)).toBe(true);
+    expect(readdirSync(backupDir).sort()).toEqual(backupsBefore);
+
+    // Reparatur: Die Änderung gilt danach als jetzt gemacht und wird hochgeladen.
+    const now = Date.now();
+    const { vault: repaired, restamped } = restampFutureTimes(laptop, now + DEFAULT_SYNC_SETTINGS.maxClockSkewMs, now);
+    expect(restamped).toBeGreaterThan(0);
+    const result = await syncVault(repaired, adapter(), codec, options());
+    expect(result.written).toBe(true);
+    const final = await readKdbx(new Uint8Array(readFileSync(filePath)), credentials);
+    expect(findEntry(final, uuids.mail)!.strings.get("URL")?.value).toBe("https://falsche-uhr-offline.example");
+    expect(latestVaultTime(final)).toBeLessThanOrEqual(Date.now() + DEFAULT_SYNC_SETTINGS.maxClockSkewMs);
+    vivaldiVault = (await syncVault(vivaldiVault, adapter(), codec, options())).vault;
   });
 
   it("Upload bricht mitten im PUT ab: Datei bleibt lesbar (alte Fassung), der nächste Abgleich klappt", async () => {

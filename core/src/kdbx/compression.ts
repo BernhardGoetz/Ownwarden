@@ -6,7 +6,7 @@
  * Gigabytes aufgeblasen werden („Zip-Bombe“).
  */
 import { KdbxError } from "../contracts";
-import { asBufferSource, concatBytes } from "./bytes";
+import { asBufferSource, concatByteArrays } from "./bytes";
 import { MAX_PAYLOAD_BYTES } from "./constants";
 
 export async function gzip(data: Uint8Array): Promise<Uint8Array> {
@@ -38,5 +38,5 @@ export async function gunzip(data: Uint8Array, maxBytes = MAX_PAYLOAD_BYTES): Pr
     if (error instanceof KdbxError) throw error;
     throw new KdbxError("Corrupt", `GZip-Daten sind beschädigt: ${(error as Error).message}`);
   }
-  return concatBytes(...chunks);
+  return concatByteArrays(chunks);
 }

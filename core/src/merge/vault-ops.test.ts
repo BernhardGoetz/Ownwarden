@@ -3,7 +3,10 @@
  */
 import { describe, expect, it } from "vitest";
 import { allEntries, newEntry, newGroup, newVault, T0, uuidFromName } from "../../test/helpers/vault-builder";
+import { identityStream } from "../../test/fixtures/xml/fixtures";
 import { FIELD_TIMES_KEY } from "../contracts";
+import { parseVaultXml, serializeVaultXml } from "../kdbx/xml";
+import { stripInvalidXmlChars } from "../kdbx/xml-dom";
 import type { Entry, Vault } from "../model";
 import { createVaultClock, latestVaultTime, VaultClock } from "./clock";
 import { effectiveFieldTimes, type FieldTime } from "./field-times";
@@ -258,5 +261,89 @@ describe("Gruppen bearbeiten", () => {
     expect(allEntries(vault)).toEqual([]);
     expect(vault.deletedObjects.map((d) => d.uuid).sort()).toEqual([bank.uuid, sub.uuid, entry.uuid, other.uuid].sort());
     expect(() => deleteGroup(vault, vault.root.uuid, clock)).toThrow(/Wurzel/);
+  });
+});
+
+describe("UUIDs", () => {
+  it("Gruppen und Einträge teilen sich einen Namensraum: keine UUID doppelt (mergeVaults lehnt doppelte ab)", () => {
+    const { vault, clock, bank, entry } = setup();
+    expect(() => createEntry(vault, vault.root.uuid, { Title: "x" }, clock, { uuid: bank.uuid })).toThrow(/Gruppe mit der UUID/);
+    expect(() => createEntry(vault, vault.root.uuid, { Title: "x" }, clock, { uuid: vault.root.uuid })).toThrow(/Gruppe mit der UUID/);
+    expect(() => createGroup(vault, vault.root.uuid, "G", clock, { uuid: entry.uuid })).toThrow(/Eintrag mit der UUID/);
+    expect(() => createEntry(vault, vault.root.uuid, { Title: "x" }, clock, { uuid: entry.uuid })).toThrow(/Eintrag mit der UUID/);
+  });
+});
+
+describe("Zeichen, die KDBX nicht speichern kann (Review kdbx-2)", () => {
+  /** Speichern und Laden über XML. */
+  const saveAndLoad = (vault: Vault): Vault => {
+    const { xml, binaries } = serializeVaultXml(vault, identityStream());
+    return parseVaultXml(xml, binaries, identityStream(), vault.settings);
+  };
+
+  it("lehnt in ungeschütztem Text genau die Zeichen ab, die der Writer entfernen würde", () => {
+    const { vault, clock, bank } = setup();
+    const wrong: string[] = [];
+    const check = (text: string, label: string): void => {
+      let rejected = false;
+      try {
+        renameGroup(vault, bank.uuid, text, clock);
+      } catch (error) {
+        expect(error).toBeInstanceOf(RangeError);
+        rejected = true;
+      }
+      if (rejected !== (stripInvalidXmlChars(text) !== text)) wrong.push(label);
+    };
+    for (let code = 0; code < 0x10000; code++) check(`a${String.fromCharCode(code)}b`, `U+${code.toString(16)}`);
+    check("a😀b", "Surrogat-Paar");
+    check("a\uDE00\uD83Db", "Surrogat-Paar verkehrt herum");
+    check("\uD83D", "hohes Surrogat am Ende");
+    check("\uDE00a", "tiefes Surrogat am Anfang");
+    expect(wrong).toEqual([]);
+  });
+
+  it("geschützte Werte: nur einzelne Surrogate werden abgelehnt (genau die, die UTF-8 nicht kennt); Steuerzeichen bleiben erhalten", () => {
+    const { vault, entry, clock } = setup();
+    for (const value of ["a\u0001b", "a\u000Bb", "a￾b", "a😀b", "a\uD800b", "a\uDC00b", "\uD800"]) {
+      const lost = new TextDecoder().decode(new TextEncoder().encode(value)) !== value;
+      const attempt = () => setField(vault, entry.uuid, "Password", value, { protected: true }, clock);
+      if (lost) expect(attempt, JSON.stringify(value)).toThrow(RangeError);
+      else expect(attempt, JSON.stringify(value)).not.toThrow();
+    }
+    setField(vault, entry.uuid, "Password", "Zeile1\u000BZeile2", { protected: true }, clock);
+    expect(findEntry(saveAndLoad(vault), entry.uuid)!.strings.get("Password")).toEqual({ value: "Zeile1\u000BZeile2", protected: true });
+  });
+
+  it("jeder Weg ins Modell lehnt ab, ohne etwas zu verändern; die Meldung nennt den Wert nicht", () => {
+    const { vault, entry, clock, bank } = setup();
+    const before = structuredClone(vault);
+    const attempts: [string, () => unknown][] = [
+      ["createEntry: Wert", () => createEntry(vault, vault.root.uuid, { Title: "geheim\u000B" }, clock)],
+      ["createEntry: geschützter Wert", () => createEntry(vault, vault.root.uuid, { Title: "x", Password: "geheim\uD800" }, clock)],
+      ["createEntry: Feldname", () => createEntry(vault, vault.root.uuid, { "PIN\u0001": "1" }, clock)],
+      ["createEntry: Tag", () => createEntry(vault, vault.root.uuid, { Title: "x" }, clock, { tags: ["a\u0002b"] })],
+      ["setField: Wert", () => setField(vault, entry.uuid, "Notes", "geheim\u0007", {}, clock)],
+      ["setField: Feldname", () => setField(vault, entry.uuid, "Frage￿", "1", {}, clock)],
+      ["setAttachment: Name", () => setAttachment(vault, entry.uuid, "a\u0000.txt", Uint8Array.of(1), {}, clock)],
+      ["setTags", () => setTags(vault, entry.uuid, ["a￾b"], clock)],
+      ["setPasskey: ungeschützter Wert", () => setPasskey(vault, entry.uuid, { KPEX_PASSKEY_USERNAME: "geheim\u001F" }, clock)],
+      ["editEntry: CustomData-Schlüssel", () => editEntry(vault, entry.uuid, (draft) => void draft.customData.set("k\u0003", { value: "v" }), clock)],
+      ["editEntry: CustomData-Wert", () => editEntry(vault, entry.uuid, (draft) => void draft.customData.set("k", { value: "geheim\u0003" }), clock)],
+      ["editEntry: OverrideURL", () => editEntry(vault, entry.uuid, (draft) => void (draft.overrideUrl = "cmd://geheim\u000C"), clock)],
+      ["editEntry: Farbe", () => editEntry(vault, entry.uuid, (draft) => void (draft.foregroundColor = "#FF0000\u0008"), clock)],
+      ["editEntry: Text-Feld", () => editEntry(vault, entry.uuid, (draft) => void draft.strings.set("UserName", { value: "geheim\uDBFF", protected: false }), clock)],
+      ["createGroup", () => createGroup(vault, vault.root.uuid, "Bank\u000B", clock)],
+      ["renameGroup", () => renameGroup(vault, bank.uuid, "Bank\u000B", clock)],
+    ];
+    for (const [label, attempt] of attempts) {
+      expect(attempt, label).toThrow(RangeError);
+      expect(attempt, label).toThrow(/KDBX nicht speichern/);
+      try {
+        attempt();
+      } catch (error) {
+        expect((error as Error).message, label).not.toContain("geheim");
+      }
+    }
+    expect(vault).toEqual(before);
   });
 });

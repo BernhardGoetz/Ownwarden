@@ -9,6 +9,7 @@ import { StorageError } from "../contracts";
 import { mergeVaults } from "../merge/merge";
 import { newVault } from "../../test/helpers/vault-builder";
 import { parseMultistatus } from "./multistatus";
+import { backupVersionTag } from "./backup-names";
 import { syncVault } from "./sync";
 import { createJsonCodec } from "./testing/json-codec";
 import { WebDavAdapter, type WebDavAdapterOptions } from "./webdav";
@@ -55,13 +56,14 @@ function fileResponse(href: string): string {
 }
 
 describe("Verdacht: Aufräumen löscht die eben angelegte Sicherung (Geräteuhren weichen ab)", () => {
-  // Gerät B (Uhr richtig) legt seine Sicherung an. Im Ordner liegt schon eine Sicherung von
-  // Gerät A, dessen Uhr eine Minute vorgeht (innerhalb der erlaubten Abweichung). Nach Namen
-  // sortiert gilt A's Sicherung als „neuer“. Mit keep = 1 darf trotzdem nicht die eben
-  // angelegte Sicherung gelöscht werden – sonst schreibt syncVault ohne Sicherung der
-  // Fassung, die es gleich überschreibt.
-  const ownName = "tresor.20261015-171500-042.kdbx";
-  const otherDeviceName = "tresor.20261015-171600-000.kdbx"; // Uhr von Gerät A: +60 s
+  // Gerät B (Uhr richtig) hat seine Sicherung angelegt und erfolgreich geschrieben. Im Ordner
+  // liegt schon eine Sicherung von Gerät A, dessen Uhr eine Minute vorgeht (innerhalb der
+  // erlaubten Abweichung). Nach Namen sortiert gilt A's Sicherung als „neuer“. Mit keep = 1 darf
+  // trotzdem nicht die Sicherung der eben überschriebenen Fassung gelöscht werden – sonst gäbe es
+  // von ihr keine Sicherung mehr. (Seit Review xc-1 räumt pruneBackups getrennt auf; erkannt wird
+  // die eigene Sicherung an der Kennung der Fassung im Namen.)
+  const ownName = `tresor.20261015-171500-042.${backupVersionTag('"1"')}.kdbx`;
+  const otherDeviceName = `tresor.20261015-171600-000.${backupVersionTag('"0"')}.kdbx`; // Uhr von Gerät A: +60 s
 
   function server(): Handler {
     return (request) => {
@@ -80,11 +82,9 @@ describe("Verdacht: Aufräumen löscht die eben angelegte Sicherung (Geräteuhre
     };
   }
 
-  it("keep = 1: die eigene, eben angelegte Sicherung bleibt erhalten", async () => {
+  it("keep = 1: die eigene Sicherung der überschriebenen Fassung bleibt erhalten", async () => {
     const { adapter, requests } = fakeAdapter(server());
-    await adapter.backup({ data: bytes("alt"), etag: '"1"' }, 1);
-    const copied = requests.find((request) => request.method === "COPY")!.headers.get("Destination");
-    expect(copied).toBe(`https://cloud.example${FOLDER_PATH}${ownName}`);
+    await adapter.pruneBackups({ data: bytes("alt"), etag: '"1"' }, 1);
     const deleted = requests.filter((request) => request.method === "DELETE").map((request) => request.url);
     expect(deleted).not.toContain(`https://cloud.example${FOLDER_PATH}${ownName}`);
     // Höchstens `keep` Sicherungen bleiben: die fremde wird gelöscht.
@@ -93,8 +93,14 @@ describe("Verdacht: Aufräumen löscht die eben angelegte Sicherung (Geräteuhre
 
   it("keep = 2: beide bleiben (nichts zu löschen)", async () => {
     const { adapter, requests } = fakeAdapter(server());
-    await adapter.backup({ data: bytes("alt"), etag: '"1"' }, 2);
+    await adapter.pruneBackups({ data: bytes("alt"), etag: '"1"' }, 2);
     expect(requests.filter((request) => request.method === "DELETE")).toEqual([]);
+  });
+
+  it("backup() löscht nie etwas", async () => {
+    const { adapter, requests } = fakeAdapter(server());
+    await adapter.backup({ data: bytes("neu"), etag: '"2"' });
+    expect(requests.map((request) => request.method)).toEqual(["MKCOL", "PROPFIND", "COPY"]);
   });
 });
 
@@ -183,8 +189,9 @@ describe("Verdacht: ETag wird verändert, bevor er im If-Match landet (widerlegt
     const put = requests.find((request) => request.method === "PUT" && request.url === FILE_URL)!;
     expect(put.headers.get("If-Match")).toBe(etag);
     expect(put.headers.get("If-None-Match")).toBeNull();
-    // Reihenfolge: Lesen, Sicherung (MKCOL, COPY, PROPFIND), erst dann Schreiben.
-    expect(requests.map((request) => request.method)).toEqual(["GET", "MKCOL", "COPY", "PROPFIND", "PUT"]);
+    // Reihenfolge: Lesen, Sicherung (MKCOL, PROPFIND: schon gesichert?, COPY), dann Schreiben,
+    // erst danach Aufräumen (PROPFIND; Review xc-1).
+    expect(requests.map((request) => request.method)).toEqual(["GET", "MKCOL", "PROPFIND", "COPY", "PUT", "PROPFIND"]);
   });
 
   it("getetag aus PROPFIND: Entitäten aufgelöst, nur der XML-Einzug entfernt", () => {
@@ -244,7 +251,7 @@ describe("Verdacht: Aufräumen löscht außerhalb des Sicherungsordners (widerle
       if (request.method === "MKCOL") return new Response(null, { status: 405 });
       return new Response(null, { status: request.method === "COPY" ? 201 : 204 });
     });
-    await adapter.backup({ data: bytes("alt"), etag: '"1"' }, 1);
+    await adapter.pruneBackups({ data: bytes("alt"), etag: '"1"' }, 1);
     expect(requests.filter((request) => request.method === "DELETE")).toEqual([]);
   });
 
@@ -259,7 +266,7 @@ describe("Verdacht: Aufräumen löscht außerhalb des Sicherungsordners (widerle
       if (request.method === "MKCOL") return new Response(null, { status: 405 });
       return new Response(null, { status: request.method === "COPY" ? 201 : 204 });
     });
-    await adapter.backup({ data: bytes("alt"), etag: '"1"' }, 1);
+    await adapter.pruneBackups({ data: bytes("alt"), etag: '"1"' }, 1);
     const deleted = requests.filter((request) => request.method === "DELETE").map((request) => new URL(request.url).origin);
     expect(deleted.length).toBeGreaterThan(0);
     expect(new Set(deleted)).toEqual(new Set(["https://cloud.example"]));

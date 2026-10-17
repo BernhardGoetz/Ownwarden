@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { entryByTitle, newVault, T0, uuidFromName } from "../../test/helpers/vault-builder";
 import {
   ClockSkewError,
+  FutureTimestampsError,
   PreconditionFailedError,
   StorageAuthError,
   StorageError,
@@ -16,9 +17,10 @@ import {
 } from "../contracts";
 import type { Vault } from "../model";
 import { cloneVault } from "../merge/clone";
-import { createVaultClock } from "../merge/clock";
+import { createVaultClock, latestVaultTime } from "../merge/clock";
 import { mergeVaults } from "../merge/merge";
 import { createEntry, setField } from "../merge/vault-ops";
+import { restampFutureTimes } from "./future-times";
 import { InMemoryAdapter, InMemoryStorage } from "./memory-adapter";
 import { DEFAULT_SYNC_SETTINGS, syncVault } from "./sync";
 import { createJsonCodec } from "./testing/json-codec";
@@ -318,6 +320,92 @@ describe("syncVault: Schutz vor Datenverlust", () => {
     await expect(syncVault(baseVault(), adapter, broken, options())).rejects.toThrow("falsches Passwort");
     expect(adapter.stats.writes).toBe(1);
     expect(adapter.stats.backups).toBe(0);
+  });
+
+  // Review merge-2/sync-2, Entscheidung des Eigentümers (2026-10-17): Zeitstempel aus der Zukunft
+  // in der LOKALEN Fassung (offline mit vorgehender Uhr bearbeitet, Uhr danach gestellt).
+  it("lokale Zeitstempel nach Serverzeit + maxClockSkewMs: FutureTimestampsError, nichts gesichert oder geschrieben", async () => {
+    const server = newServer();
+    const codec = createJsonCodec();
+    const adapter = new InMemoryAdapter({ storage: server });
+    const base = (await syncVault(baseVault(), adapter, codec, options())).vault;
+    const before = server.current()!;
+    const local = cloneVault(base);
+    setField(local, MAIL, "Password", "falsche Uhr", {}, createVaultClock(local, () => NOW + 3 * 60_000));
+
+    const failure = syncVault(local, adapter, codec, options());
+
+    await expect(failure).rejects.toBeInstanceOf(FutureTimestampsError);
+    await expect(failure).rejects.toMatchObject({ latestTime: NOW + 3 * 60_000, limit: NOW + 120_000 });
+    await expect(failure).rejects.toThrow(/Zukunft.*nichts geschrieben/s);
+    expect(server.current()!.etag).toBe(before.etag);
+    expect(adapter.stats).toMatchObject({ writes: 1, backups: 0 });
+
+    // Bis maxClockSkewMs ist es erlaubt (z. B. ein anderes Gerät mit etwas vorgehender Uhr).
+    const almost = cloneVault(base);
+    setField(almost, MAIL, "Password", "knapp", {}, createVaultClock(almost, () => NOW + 120_000));
+    expect((await syncVault(almost, adapter, codec, options())).written).toBe(true);
+  });
+
+  it("nach der Reparatur (restampFutureTimes) klappt der Abgleich; die Änderung gilt als jetzt gemacht", async () => {
+    const server = newServer();
+    const codec = createJsonCodec();
+    const adapter = new InMemoryAdapter({ storage: server });
+    const base = (await syncVault(baseVault(), adapter, codec, options())).vault;
+    const local = cloneVault(base);
+    setField(local, MAIL, "Password", "falsche Uhr", {}, createVaultClock(local, () => NOW + 86_400_000));
+    await expect(syncVault(local, adapter, codec, options())).rejects.toBeInstanceOf(FutureTimestampsError);
+
+    const { vault: repaired } = restampFutureTimes(local, NOW + 120_000, NOW);
+    const result = await syncVault(repaired, adapter, codec, options());
+
+    expect(result.written).toBe(true);
+    const final = await serverVault(server, codec);
+    expect(field(final, "Password")).toBe("falsche Uhr");
+    expect(latestVaultTime(final)).toBe(NOW);
+  });
+
+  it("erstes Hochladen: Grenze ist die Gerätezeit + maxClockSkewMs; ohne Date-Header ebenso", async () => {
+    const codec = createJsonCodec();
+    const future = baseVault();
+    setField(future, MAIL, "Password", "falsche Uhr", {}, createVaultClock(future, () => NOW + 86_400_000));
+
+    const empty = new InMemoryAdapter({ storage: newServer() });
+    await expect(syncVault(future, empty, codec, options())).rejects.toBeInstanceOf(FutureTimestampsError);
+    expect(empty.storage.current()).toBeNull();
+    expect(codec.encodes).toBe(0);
+
+    const noDate = new InMemoryStorage({ serverClock: null });
+    const adapter = new InMemoryAdapter({ storage: noDate });
+    await syncVault(baseVault(), adapter, codec, options());
+    const before = noDate.current()!.etag;
+    await expect(syncVault(future, adapter, codec, options())).rejects.toBeInstanceOf(FutureTimestampsError);
+    expect(noDate.current()!.etag).toBe(before);
+  });
+
+  it("stammen die Zeiten aus der Zukunft schon vom Server (z. B. KeePassXC mit falscher Uhr), sperrt das die Geräte nicht dauerhaft", async () => {
+    const server = newServer();
+    const codec = createJsonCodec();
+    const adapter = new InMemoryAdapter({ storage: server });
+    const base = (await syncVault(baseVault(), adapter, codec, options())).vault;
+    // Ein anderes Programm hat mit Uhr einen Tag vor geschrieben (ohne Ownwarden-Prüfung).
+    const polluted = cloneVault(base);
+    setField(polluted, MAIL, "UserName", "von KeePassXC", {}, createVaultClock(polluted, () => NOW + 86_400_000));
+    server.put(await codec.encode(polluted));
+
+    // Erster Abgleich übernimmt die Zeiten; danach enthält auch die lokale Fassung sie ...
+    const first = await syncVault(base, adapter, codec, options());
+    expect(latestVaultTime(first.vault)).toBeGreaterThan(NOW + 120_000);
+    // ... und eine neue lokale Änderung (VaultClock stempelt knapp danach) wird trotzdem abgeglichen.
+    const local = cloneVault(first.vault);
+    setField(local, MAIL, "Password", "neu", {}, createVaultClock(local, () => NOW));
+    const second = await syncVault(local, adapter, codec, options());
+    expect(second.written).toBe(true);
+    expect(field(await serverVault(server, codec), "Password")).toBe("neu");
+    // Weiter in die Zukunft als die Datei auf dem Server (plus maxClockSkewMs) geht es aber nicht.
+    const further = cloneVault(second.vault);
+    setField(further, MAIL, "Notes", "noch weiter", {}, createVaultClock(further, () => NOW + 2 * 86_400_000));
+    await expect(syncVault(further, adapter, codec, options())).rejects.toBeInstanceOf(FutureTimestampsError);
   });
 
   it("prüft die Optionen", async () => {

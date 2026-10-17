@@ -1,0 +1,86 @@
+{
+  "name": "32-ohne-fieldtimes-neuere-entfernt",
+  "description": "Eintrag e1 hat auf BEIDEN Seiten keine FieldTimes (in KeePassXC angelegt, von Ownwarden nie geändert). remote ist die neuere Fassung: In KeePassXC wurden das Feld PIN entfernt, die Tags geleert und der Ablauf abgeschaltet, ohne Verlaufseintrag (z. B. HistoryMaxItems = 0 oder Verlauf gelöscht), und ein Feld Frage angelegt. local ist eine ältere Kopie. Die neuere Seite ist maßgeblich dafür, welche Felder fehlen: Sie bekommt für PIN, tags und expiry Lösch-Marker zu ihrer Basiszeit (spec/README.md, Abschnitt 5.1). Ohne diese Regel brächte die ältere Kopie PIN, Tags und Ablauf zurück. Die überschriebene ältere Fassung kommt wie immer in den Verlauf.",
+  "local": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000000000,
+        "fields": {
+          "Title": "Konto",
+          "PIN": "1234"
+        },
+        "tags": [
+          "alt"
+        ],
+        "expiry": 1701000000000
+      }
+    ]
+  },
+  "remote": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000500000,
+        "locationChanged": 1700000000000,
+        "fields": {
+          "Title": "Konto",
+          "Frage": "neu"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "entries": [
+      {
+        "uuid": "e1",
+        "lastModification": 1700000500000,
+        "fields": {
+          "Title": "Konto",
+          "Frage": "neu"
+        },
+        "fieldTimes": {
+          "s:Title": 1700000500000,
+          "s:Frage": 1700000500000,
+          "s:PIN": 1700000500000,
+          "tags": 1700000500000,
+          "expiry": 1700000500000,
+          "parent": 1700000000000
+        },
+        "history": [
+          {
+            "lastModification": 1700000000000,
+            "fields": {
+              "Title": "Konto",
+              "PIN": "1234"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expectedReport": {
+    "entriesDeleted": 0,
+    "externalEdits": [],
+    "fieldConflicts": [
+      {
+        "entry": "e1",
+        "field": "expiry",
+        "winner": "remote",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "s:PIN",
+        "winner": "remote",
+        "tieBreak": false
+      },
+      {
+        "entry": "e1",
+        "field": "tags",
+        "winner": "remote",
+        "tieBreak": false
+      }
+    ]
+  }
+}

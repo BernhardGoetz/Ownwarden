@@ -73,7 +73,14 @@ export type { EntryLocation, GroupLocation } from "./merge/tree";
 
 // Abgleich mit dem Speicher
 export { adoptServerSettings, DEFAULT_SYNC_SETTINGS, syncVault } from "./sync/sync";
+export { restampFutureTimes, type RestampResult } from "./sync/future-times";
 export { createKdbxCodec } from "./sync/kdbx-codec";
-export { BACKUP_FOLDER_NAME, DEFAULT_WEBDAV_TIMEOUT_MS, WebDavAdapter, type WebDavAdapterOptions } from "./sync/webdav";
+export {
+  BACKUP_FOLDER_NAME,
+  DEFAULT_WEBDAV_TIMEOUT_MS,
+  MIN_UPLOAD_BYTES_PER_SECOND,
+  WebDavAdapter,
+  type WebDavAdapterOptions,
+} from "./sync/webdav";
 export { InMemoryAdapter, InMemoryStorage, type InMemoryAdapterOptions, type InMemoryStorageOptions } from "./sync/memory-adapter";
 export { vaultsEquivalent } from "./sync/vault-equal";

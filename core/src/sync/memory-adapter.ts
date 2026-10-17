@@ -7,7 +7,8 @@
  *   - write() prüft die Bedingung wie ein Server: "If-None-Match: *" scheitert (412), wenn
  *     die Datei existiert; "If-Match" scheitert, wenn sie fehlt oder der ETag nicht passt.
  *   - read() liefert eine Kopie der Bytes, den ETag und die Serverzeit (Date-Header).
- *   - backup() legt Kopien an und behält nur die neuesten `keep`.
+ *   - backup() legt pro Fassung (ETag) höchstens eine Kopie an; pruneBackups() behält nur
+ *     die neuesten `keep`, die Kopie der eben überschriebenen Fassung immer (wie WebDavAdapter).
  *
  * Mehrere Geräte: Alle Adapter mit derselben InMemoryStorage („Server“) sehen dieselbe
  * Datei, z. B.
@@ -20,7 +21,7 @@
  * (storage.put(...) oder ein ganzes syncVault eines zweiten Adapters) – genau der Fall
  * „zwischen Lesen und Schreiben hat jemand anderes geschrieben“.
  */
-import { PreconditionFailedError, type RemoteFile, type StorageAdapter, type WriteCondition } from "../contracts";
+import { PreconditionFailedError, type BackupResult, type RemoteFile, type StorageAdapter, type WriteCondition } from "../contracts";
 import type { Millis } from "../model";
 
 /** Eine gespeicherte Fassung. */
@@ -77,11 +78,20 @@ export class InMemoryStorage {
     this.file = null;
   }
 
-  /** Legt eine Sicherungskopie an und behält nur die neuesten `keep`. */
-  addBackup(file: StoredFile, keep: number): void {
+  /** Legt eine Sicherungskopie der Fassung `file` an, außer es gibt schon eine (gleicher ETag). Liefert true, wenn angelegt. */
+  addBackup(file: StoredFile): boolean {
+    if (this.backups.some((backup) => backup.etag === file.etag)) return false;
     this.backupSequence += 1;
     this.backups.push({ data: file.data.slice(), etag: file.etag, sequence: this.backupSequence });
-    if (this.backups.length > keep) this.backups.splice(0, this.backups.length - keep);
+    return true;
+  }
+
+  /** Behält nur die neuesten `keep` Sicherungskopien; die der Fassung `protectedEtag` bleibt immer. */
+  pruneBackups(keep: number, protectedEtag: string): void {
+    const others = this.backups.filter((backup) => backup.etag !== protectedEtag);
+    const keepOthers = others.length === this.backups.length ? keep : keep - 1;
+    const doomed = new Set(others.slice(0, Math.max(others.length - keepOthers, 0)));
+    for (let i = this.backups.length - 1; i >= 0; i--) if (doomed.has(this.backups[i]!)) this.backups.splice(i, 1);
   }
 
   /** Serverzeit für den „Date-Header“ (ganze Sekunden, wie bei HTTP) oder undefined. */
@@ -107,12 +117,15 @@ export interface InMemoryAdapterStats {
   writes: number;
   /** Mit 412 abgelehnte Schreibvorgänge. */
   rejectedWrites: number;
+  /** Angelegte Sicherungskopien (Aufrufe für eine schon gesicherte Fassung zählen nicht). */
   backups: number;
+  /** Aufrufe von pruneBackups. */
+  prunes: number;
 }
 
 export class InMemoryAdapter implements StorageAdapter {
   readonly storage: InMemoryStorage;
-  readonly stats: InMemoryAdapterStats = { reads: 0, writes: 0, rejectedWrites: 0, backups: 0 };
+  readonly stats: InMemoryAdapterStats = { reads: 0, writes: 0, rejectedWrites: 0, backups: 0, prunes: 0 };
   /** Siehe Kopfkommentar: hier gleichzeitige Änderungen einspielen. */
   beforeWrite: BeforeWriteHook | undefined;
   /** Ist ein Fehler gesetzt, wirft das nächste backup() ihn (einmalig). */
@@ -151,14 +164,19 @@ export class InMemoryAdapter implements StorageAdapter {
     return serverDate === undefined ? { etag } : { etag, serverDate };
   }
 
-  async backup(current: RemoteFile, keep: number): Promise<void> {
-    if (!Number.isInteger(keep) || keep < 1) throw new RangeError("backup: keep muss eine ganze Zahl ≥ 1 sein.");
+  async backup(current: RemoteFile): Promise<void> {
     const failure = this.nextBackupError;
     if (failure !== undefined) {
       this.nextBackupError = undefined;
       throw failure;
     }
-    this.storage.addBackup({ data: current.data, etag: current.etag }, keep);
-    this.stats.backups += 1;
+    if (this.storage.addBackup({ data: current.data, etag: current.etag })) this.stats.backups += 1;
+  }
+
+  async pruneBackups(current: RemoteFile, keep: number): Promise<BackupResult> {
+    if (!Number.isInteger(keep) || keep < 1) throw new RangeError("pruneBackups: keep muss eine ganze Zahl ≥ 1 sein.");
+    this.storage.pruneBackups(keep, current.etag);
+    this.stats.prunes += 1;
+    return { warnings: [] };
   }
 }

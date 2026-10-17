@@ -170,7 +170,7 @@ export class ByteWriter {
   }
 
   toBytes(): Uint8Array {
-    return concatBytes(...this.parts);
+    return concatByteArrays(this.parts);
   }
 
   get byteLength(): number {
@@ -196,8 +196,18 @@ export function u64le(value: bigint): Uint8Array {
   return bytes;
 }
 
-/** Hängt mehrere Byte-Arrays aneinander. */
+/** Hängt mehrere Byte-Arrays aneinander (für wenige, feste Teile; Listen: concatByteArrays). */
 export function concatBytes(...arrays: Uint8Array[]): Uint8Array {
+  return concatByteArrays(arrays);
+}
+
+/**
+ * Hängt die Byte-Arrays einer Liste beliebiger Länge aneinander (Blöcke, Chunks, Teile des
+ * ByteWriter). Nicht `concatBytes(...liste)`: Dabei wird jedes Element ein eigenes
+ * Funktionsargument, und ab etwa 100 000 Teilen scheitert der Aufruf mit „Maximum call stack
+ * size exceeded“ – einem RangeError statt KdbxError (Review kdbx-7).
+ */
+export function concatByteArrays(arrays: readonly Uint8Array[]): Uint8Array {
   let total = 0;
   for (const a of arrays) total += a.length;
   const result = new Uint8Array(total);

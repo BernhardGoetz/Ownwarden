@@ -39,8 +39,12 @@ async function createAndSyncRepeatedly(fields: Parameters<typeof createEntry>[2]
   let vault: Vault = newVault();
   try {
     createEntry(vault, vault.root.uuid, fields, createVaultClock(vault, () => (time += 1234)));
-  } catch {
-    return { rejected: true }; // vault-ops lehnt den Wert ab: in Ordnung
+  } catch (error) {
+    // vault-ops lehnt den Wert ab: in Ordnung – mit klarem RangeError und ohne den Eintrag
+    // anzulegen (Entscheidung 2026-10-17: ablehnen, nie still verändern).
+    expect(error).toBeInstanceOf(RangeError);
+    expect(vault.root.entries).toEqual([]);
+    return { rejected: true };
   }
 
   time += 1000;

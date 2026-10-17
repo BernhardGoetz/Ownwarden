@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { newVault, uuidFromName } from "../../test/helpers/vault-builder";
-import type { BackupResult, RemoteFile, StorageAdapter, SyncOptions, WriteCondition } from "../contracts";
+import { StorageError, type BackupResult, type RemoteFile, type StorageAdapter, type SyncOptions, type WriteCondition } from "../contracts";
 import type { Vault } from "../model";
 import { createVaultClock } from "../merge/clock";
 import { mergeVaults } from "../merge/merge";
@@ -23,12 +23,18 @@ const options = (): SyncOptions => ({ now: () => Date.now(), merge: mergeVaults,
 const MAIL = uuidFromName("mail");
 
 /**
- * Speicher wie InMemoryAdapter, dessen backup() zusätzlich Hinweise liefert (so wie
- * WebDavAdapter, wenn sich eine alte Kopie nicht löschen lässt, z. B. HTTP 423).
+ * Speicher wie InMemoryAdapter, dessen pruneBackups() zusätzlich Hinweise liefert (so wie
+ * WebDavAdapter, wenn sich eine alte Kopie nicht löschen lässt, z. B. HTTP 423). Auch backup()
+ * darf laut Vertrag Hinweise liefern (warningsPerBackup). Seit Review xc-1 räumt erst
+ * pruneBackups() auf, und zwar nur nach erfolgreichem Schreiben; vorher kamen die Hinweise
+ * beim Aufräumen aus backup().
  */
 class WarningAdapter implements StorageAdapter {
   readonly inner: InMemoryAdapter;
   warningsPerBackup: string[] = [];
+  warningsPerPrune: string[] = [];
+  /** Wirft pruneBackups() trotz Vertrag (z. B. ein fehlerhafter Adapter). */
+  pruneError: Error | undefined;
   constructor(options: InMemoryAdapterOptions = {}) {
     this.inner = new InMemoryAdapter(options);
   }
@@ -44,9 +50,14 @@ class WarningAdapter implements StorageAdapter {
   write(data: Uint8Array, condition: WriteCondition) {
     return this.inner.write(data, condition);
   }
-  async backup(current: RemoteFile, keep: number): Promise<BackupResult> {
-    await this.inner.backup(current, keep);
+  async backup(current: RemoteFile): Promise<BackupResult> {
+    await this.inner.backup(current);
     return { warnings: [...this.warningsPerBackup] };
+  }
+  async pruneBackups(current: RemoteFile, keep: number): Promise<BackupResult> {
+    if (this.pruneError !== undefined) throw this.pruneError;
+    await this.inner.pruneBackups(current, keep);
+    return { warnings: [...this.warningsPerPrune] };
   }
 }
 
@@ -63,14 +74,45 @@ describe("syncVault: Hinweise beim Aufräumen der Sicherungskopien", () => {
     const created = await syncVault(initialVault(), adapter, codec, options());
     expect(created.warnings).toBeUndefined(); // Anlegen braucht keine Sicherung
 
-    adapter.warningsPerBackup = ['Alte Sicherungskopie "tresor.alt.kdbx" ließ sich nicht löschen (HTTP 423).'];
+    adapter.warningsPerPrune = ['Alte Sicherungskopie "tresor.alt.kdbx" ließ sich nicht löschen (HTTP 423).'];
     setField(created.vault, MAIL, "Password", "neu", {}, createVaultClock(created.vault));
     const result = await syncVault(created.vault, adapter, codec, options());
 
     expect(result.written).toBe(true);
-    expect(result.warnings).toEqual(adapter.warningsPerBackup);
+    expect(result.warnings).toEqual(adapter.warningsPerPrune);
     expect(storage.backups).toHaveLength(1);
     expect((await codec.decode(storage.current()!.data)).root.entries[0]!.strings.get("Password")?.value).toBe("neu");
+  });
+
+  it("Aufräumen erst NACH erfolgreichem Schreiben: scheitert das Schreiben, wird nicht aufgeräumt (Review xc-1)", async () => {
+    const storage = new InMemoryStorage();
+    const adapter = new WarningAdapter({ storage });
+    const created = await syncVault(initialVault(), adapter, codec, options());
+    adapter.warningsPerPrune = ["Hinweis vom Aufräumen"];
+    adapter.inner.beforeWrite = () => {
+      throw new StorageError("Datei gesperrt", 423);
+    };
+    setField(created.vault, MAIL, "Password", "neu", {}, createVaultClock(created.vault));
+
+    for (let round = 0; round < 3; round++) {
+      await expect(syncVault(created.vault, adapter, codec, options())).rejects.toMatchObject({ status: 423 });
+    }
+    expect(adapter.inner.stats.prunes).toBe(0);
+    // Dieselbe Fassung wurde genau einmal gesichert, nicht bei jedem Versuch erneut.
+    expect(storage.backups).toHaveLength(1);
+    expect(adapter.inner.stats.backups).toBe(1);
+  });
+
+  it("wirft der Adapter beim Aufräumen doch, gilt der Abgleich trotzdem als geschrieben (Hinweis statt Fehler)", async () => {
+    const adapter = new WarningAdapter();
+    const created = await syncVault(initialVault(), adapter, codec, options());
+    adapter.pruneError = new Error("PROPFIND kaputt");
+    setField(created.vault, MAIL, "Password", "neu", {}, createVaultClock(created.vault));
+    const result = await syncVault(created.vault, adapter, codec, options());
+    expect(result.written).toBe(true);
+    expect(result.etag).toBe(adapter.storage.current()!.etag);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings![0]).toMatch(/nicht aufgeräumt.*PROPFIND kaputt/);
   });
 
   it("Hinweise aus einem Versuch, der danach 412 bekam, gehen nicht verloren (doppelte nur einmal)", async () => {

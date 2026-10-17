@@ -10,6 +10,8 @@
  *   3. größerer kanonischer Wert (Bytes lexikografisch)
  *   4. größerer exakter Wert (Rohdaten, z. B. "\r\n" gegen "\n")
  *   Sind alle vier gleich, sind die Fassungen gleich (es wird local genommen).
+ * Haben beide Fassungen keine FieldTimes, entscheidet die neuere Fassung, welche Felder
+ * fehlen (markRemovalsOfNewerUnsealedSide).
  *
  * Danach:
  *   - Zeiten: creation = min, lastModification = max (beider Seiten und aller
@@ -21,7 +23,7 @@
  */
 import type { FieldConflict, FieldKey } from "../contracts";
 import type { Entry, Meta, Uuid } from "../model";
-import { compareBytes, sameBytes } from "./encoding";
+import { compareBytes, sameBytes, toSeconds } from "./encoding";
 import { effectiveFieldTimes, sealFieldTimes, type EffectiveFieldTimes, type FieldTime } from "./field-times";
 import { copyField, exactFieldBytes, materializeStandardFields, PARENT_FIELD, PROPERTY_FIELDS } from "./fields";
 import { contentFingerprint, historySnapshot, mergeHistory } from "./history";
@@ -74,6 +76,7 @@ export function mergeEntryVersions(
 ): MergedEntry {
   const l: Side = { ...local, effective: effectiveFieldTimes(local.entry, local.parent) };
   const r: Side = { ...remote, effective: effectiveFieldTimes(remote.entry, remote.parent) };
+  markRemovalsOfNewerUnsealedSide(l, r);
   const decisions = fieldKeys(l, r).map((key) => decide(key, l, r));
 
   const merged = emptyEntryLike(local.entry);
@@ -100,6 +103,28 @@ export function mergeEntryVersions(
     .map((d) => ({ entryUuid: local.entry.uuid, field: d.key, winner: d.winner, tieBreak: d.tieBreak }));
   const externallyEdited = { local: l.effective.externallyEdited, remote: r.effective.externallyEdited };
   return { entry: merged, parent, times, conflicts, externallyEdited };
+}
+
+/**
+ * Haben BEIDE Fassungen keine (gültigen) FieldTimes, ist die Fassung mit der neueren
+ * lastModification (ganze Sekunden) maßgeblich dafür, welche Felder FEHLEN: Jedes Feld, das ihr
+ * fehlt, die ältere Fassung aber hat, bekommt bei ihr einen Lösch-Marker zu ihrer Basiszeit
+ * (spec/README.md, Abschnitt 5.1). Die ältere Fassung kann das Feld nicht über Ownwarden
+ * angelegt haben (dann wäre sie versiegelt). Ohne diese Regel hätte ein Feld, das z. B. in
+ * KeePassXC ohne Verlaufseintrag entfernt wurde (HistoryMaxItems = 0, Verlauf gelöscht), auf
+ * der neueren Seite gar keine Zeit, und jede ältere Kopie brächte es zurück – samt Geheimnis.
+ * Verändert die Feld-Zeitstempel der neueren Seite.
+ */
+function markRemovalsOfNewerUnsealedSide(l: Side, r: Side): void {
+  if (l.effective.sealed || r.effective.sealed) return;
+  const lSecond = toSeconds(l.entry.times.lastModification);
+  const rSecond = toSeconds(r.entry.times.lastModification);
+  if (lSecond === rSecond) return;
+  const [newer, older] = lSecond > rSecond ? [l, r] : [r, l];
+  const removedAt = toSeconds(newer.entry.times.lastModification) * 1000;
+  for (const key of older.effective.values.keys()) {
+    if (!newer.effective.values.has(key)) newer.effective.times.set(key, { t: removedAt, present: false });
+  }
 }
 
 /**

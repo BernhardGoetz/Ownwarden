@@ -4,7 +4,7 @@
  * Verlaufsgröße, _LAST_MODIFIED, Bericht.
  */
 import { describe, expect, it } from "vitest";
-import { allEntries, allGroups, newEntry, newGroup, newVault, secret, T0, uuidFromName } from "../../test/helpers/vault-builder";
+import { allGroups, newEntry, newGroup, newVault, secret, T0, uuidFromName } from "../../test/helpers/vault-builder";
 import { FIELD_TIMES_KEY } from "../contracts";
 import type { Entry, Group, Vault } from "../model";
 import { cloneVault } from "./clone";
@@ -27,17 +27,17 @@ function vaultWith(entries: Entry[], groups: Group[] = [], extra: Partial<Vault>
 }
 
 describe("mergeVaults – Einzelfälle", () => {
-  it("doppelte UUID innerhalb EINER Datei: Fassungen werden zusammengeführt, nichts geht verloren", () => {
+  it("doppelte UUID innerhalb EINER Datenbank: Programmfehler, mergeVaults bricht ab statt still zusammenzulegen", () => {
+    // Früher wurden die Vorkommen zusammengeführt – bei vollem Verlauf ging dabei eines samt
+    // Passwort verloren (Review kdbx-1). Der KDBX-Leser vergibt doppelten UUIDs jetzt neue.
     const g = newGroup({ uuid: u("g"), name: "G", at: T0 });
     const first = sealedEntry("dup", T0 + 1000, { Title: "A", UserName: "alt" }, { "s:UserName": T0 + 1000, "s:Title": T0 });
     const second = sealedEntry("dup", T0 + 2000, { Title: "A", Password: "neu" }, { "s:Password": T0 + 2000, "s:Title": T0 }, u("g"));
     g.entries.push(second);
     const broken = vaultWith([first], [g]);
-    const { vault } = mergeVaults(broken, cloneVault(broken), { now: NOW });
-    const entries = allEntries(vault);
-    expect(entries).toHaveLength(1);
-    expect(entries[0]!.strings.get("UserName")?.value).toBe("alt");
-    expect(entries[0]!.strings.get("Password")?.value).toBe("neu");
+    const fine = vaultWith([sealedEntry("dup", T0, { Title: "A" })]);
+    expect(() => mergeVaults(broken, fine, { now: NOW })).toThrow(/kommt in local mehrfach vor/);
+    expect(() => mergeVaults(fine, broken, { now: NOW })).toThrow(/kommt in remote mehrfach vor/);
   });
 
   it("verschiedene Wurzel-UUIDs gelten als dieselbe Wurzel (kleinere UUID gewinnt, beide Richtungen)", () => {
