@@ -6,11 +6,27 @@
  *   - Über eine Pipe (z. B. Tests, Skripte): eine Zeile pro Abfrage. Mehrere Abfragen
  *     hintereinander (Master-Passwort, dann WebDAV-Passwort) lesen nacheinander die Zeilen
  *     derselben Eingabe – darum EIN gemeinsamer Zeilenleser statt eines neuen pro Abfrage
- *     (ein neuer würde bereits gepufferte Zeilen verlieren).
+ *     (ein neuer würde bereits gepufferte Zeilen verlieren). Die Frage geht auch hier nach
+ *     stderr: Sitzt doch ein Mensch davor, sieht er wenigstens, worauf das Programm wartet.
+ *   - Git Bash unter Windows (mintty, Review cli-1): Ältere Git-for-Windows-Versionen (vor 2.54)
+ *     reichen node.exe kein Terminal durch, sondern eine Pipe – dann zeigt das Fenster die
+ *     Eingabe im Klartext an, und Ownwarden kann das nicht verhindern. Erkennbar ist das nur
+ *     an Windows + MSYSTEM ohne Terminal; dann steht vor der Frage eine deutliche Warnung.
  *
  * Ähnlich wie promptHidden in webdav-probe.ts, dort genügt aber eine einzige Abfrage.
  */
 import { createInterface, type Interface } from "node:readline";
+
+/** Warnung, wenn die Eingabe vermutlich sichtbar ist (Git Bash ohne Terminal, siehe oben). */
+export const VISIBLE_INPUT_WARNING =
+  "⚠️  Achtung: Hier ist keine verdeckte Eingabe möglich – was getippt wird, ist vermutlich SICHTBAR " +
+  "(Git Bash ohne Terminal). Besser mit Strg+C abbrechen und PowerShell bzw. cmd benutzen, Git for Windows " +
+  "aktualisieren, „winpty npm …“ voranstellen oder das Passwort über die Umgebungsvariable übergeben.";
+
+/** true, wenn stdin keine Terminal-Eingabe ist, das Programm aber in Git Bash unter Windows läuft. */
+export function inputLikelyVisible(isTTY: boolean | undefined, platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTTY !== true && platform === "win32" && env.MSYSTEM !== undefined && env.MSYSTEM !== "";
+}
 
 export interface Prompter {
   /** Fragt verdeckt; liefert "" bei Ende der Eingabe. */
@@ -21,8 +37,13 @@ export interface Prompter {
   close(): void;
 }
 
-export function createPrompter(input: NodeJS.ReadStream = process.stdin, output: NodeJS.WriteStream = process.stderr): Prompter {
-  return input.isTTY ? new TerminalPrompter(input, output) : new PipePrompter(input);
+export function createPrompter(
+  input: NodeJS.ReadStream = process.stdin,
+  output: NodeJS.WritableStream = process.stderr,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Prompter {
+  return input.isTTY ? new TerminalPrompter(input, output) : new PipePrompter(input, output, inputLikelyVisible(input.isTTY, platform, env));
 }
 
 /** Pipe: eine Zeile pro Abfrage, über einen gemeinsamen Zeilenleser. */
@@ -33,9 +54,14 @@ class PipePrompter implements Prompter {
   private readonly waiting: ((line: string) => void)[] = [];
   private ended = false;
 
-  constructor(private readonly input: NodeJS.ReadStream) {}
+  constructor(
+    private readonly input: NodeJS.ReadStream,
+    private readonly output: NodeJS.WritableStream,
+    private readonly warnVisible: boolean,
+  ) {}
 
-  hidden(_question: string): Promise<string> {
+  hidden(question: string): Promise<string> {
+    this.output.write(this.warnVisible ? `${VISIBLE_INPUT_WARNING}\n${question}` : question);
     this.start();
     const line = this.lines.shift();
     if (line !== undefined) return Promise.resolve(line);
@@ -69,7 +95,7 @@ class TerminalPrompter implements Prompter {
 
   constructor(
     private readonly input: NodeJS.ReadStream,
-    private readonly output: NodeJS.WriteStream,
+    private readonly output: NodeJS.WritableStream,
   ) {}
 
   hidden(question: string): Promise<string> {

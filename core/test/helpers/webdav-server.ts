@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
-import { CORE_DIR, TMP_ROOT, createTmpDir, removeTmpDir } from "./keepassxc";
+import { CORE_DIR, TMP_ROOT, createTmpDir, removeTmpDir, toolAvailable } from "./keepassxc";
 
 /** Ordner des Testservers im Repo. */
 export const WEBDAV_SERVER_DIR = resolve(CORE_DIR, "..", "tools", "webdav-test-server");
@@ -52,7 +52,10 @@ export interface WebDavTestServer {
 
 let available: boolean | undefined;
 
-/** true, wenn PHP (mit den nötigen Erweiterungen) und SabreDAV bzw. Composer vorhanden sind. */
+/**
+ * true, wenn PHP (mit den nötigen Erweiterungen) und SabreDAV bzw. Composer vorhanden sind.
+ * Im strengen Modus (OWNWARDEN_REQUIRE_TOOLS=1, siehe toolAvailable) wirft es sonst.
+ */
 export function webDavTestServerAvailable(): boolean {
   if (available === undefined) {
     const check = `exit(count(array_filter(${JSON.stringify(REQUIRED_PHP_EXTENSIONS)}, fn($e) => !extension_loaded($e))) === 0 ? 0 : 1);`;
@@ -60,7 +63,7 @@ export function webDavTestServerAvailable(): boolean {
     const sabreOk = existsSync(join(WEBDAV_SERVER_DIR, "vendor", "autoload.php")) || commandSucceeds("composer", ["--version"]);
     available = phpOk && sabreOk;
   }
-  return available;
+  return toolAvailable(available, `PHP ≥ 8.1 (mit ${REQUIRED_PHP_EXTENSIONS.join(", ")}) und Composer bzw. SabreDAV für den WebDAV-Testserver`);
 }
 
 function commandSucceeds(command: string, args: string[]): boolean {

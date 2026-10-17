@@ -438,6 +438,25 @@ describe("WebDavAdapter: Sicherungskopien", () => {
     await expect(a.pruneBackups({ data: bytes("x"), etag: '"1"' }, 0)).rejects.toBeInstanceOf(RangeError);
     expect(requests).toHaveLength(0);
   });
+
+  // Review probe-2: Nennt der Server die Dateien unter einem anderen Pfad (umgeschriebene Adresse,
+  // anderer DAV-Zugang), findet das Aufräumen nie etwas und löscht nie – das soll nicht still
+  // bleiben. Erkennbar daran, dass die eben sichergestellte Sicherung in der Liste fehlt.
+  it("fehlt die Sicherung der überschriebenen Fassung in der Ordnerliste, gibt es einen Hinweis", async () => {
+    const listing = [
+      davResponse(`/remote.php/dav/files/uid/Ownwarden/ownwarden-backups/${expectedName}`, "<d:resourcetype/>"),
+      davResponse("/remote.php/dav/files/uid/Ownwarden/ownwarden-backups/tresor.20261014-100000-000.kdbx", "<d:resourcetype/>"),
+    ];
+    const { adapter: a, requests } = adapter(backupServer({ listing }));
+    const result = await a.pruneBackups(current, 1);
+    expect(requests.filter((r) => r.method === "DELETE")).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatch(/fehlt in der Liste des Sicherungsordners/);
+
+    // Steht sie in der Liste, gibt es keinen Hinweis.
+    const fine = adapter(backupServer({ listing: [davResponse(`${folderPath}${expectedName}`, "<d:resourcetype/>")] }));
+    expect(await fine.adapter.pruneBackups(current, 1)).toEqual({ warnings: [] });
+  });
 });
 
 // Review webdav-1/xc-7: Das Zeitlimit greift bei Stillstand, nicht für die ganze Übertragung,
@@ -497,7 +516,7 @@ describe("WebDavAdapter: Zeitlimit gegen Stillstand", () => {
     expect(await a.write(new Uint8Array(MIN_UPLOAD_BYTES_PER_SECOND), { ifMatch: '"alt"' })).toEqual({ etag: '"neu"' });
     const error = await caught(a.write(bytes("klein"), { ifMatch: '"alt"' }));
     expect(error).toBeInstanceOf(StorageError);
-    expect(String(error)).toMatch(/PUT .*Zeitüberschreitung/);
+    expect(String(error)).toMatch(/PUT .*Zeitüberschreitung bei der Übertragung/);
     expect(String(error)).not.toMatch(/keine Antwort/);
   });
 });

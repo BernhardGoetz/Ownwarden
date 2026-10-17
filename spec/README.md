@@ -373,12 +373,18 @@ Verweise auf die alte UUID (RecycleBinUUID, PreviousParentGroup, `{REF:…}`) we
 umgeschrieben; sie meinen weiterhin das erste Vorkommen. Beispiel: `u` =
 `l8ruJYQAj5WS5uV32csPAQ==` (Name `"doppelt"` nach 7.1) → zweites Vorkommen
 `v34trW/2XP1goJfcx5kIJg==` (`k` = 1), drittes `5PpYLyDtzicRvVNYd2ZAug==` (`k` = 2), sofern
-nicht schon vergeben.
+nicht schon vergeben. Zweiter Prüfwert (aus `core/src/kdbx/duplicate-uuids.test.ts`, mit
+Python `hashlib` gegengerechnet): `u` = 16 Byte `0x0A` (`CgoKCgoKCgoKCgoKCgoKCg==`) → `k` = 1:
+`IRVzD02hLpXDl92SvdLBPw==` (hex `2115730f4da12e95c397dd92bdd2c13f`), `k` = 2:
+`6I8NDDR350InJO1VUtSsrg==` (hex `e88f0d0c3477e7422724ed5552d4acae`).
 
 **Verschiedene Wurzeln:** Haben beide Seiten verschiedene Wurzel-UUIDs, gelten beide Wurzeln
 als dieselbe Gruppe; ihre UUID im Ergebnis ist die kleinere (Base64-Text, UTF-8-Bytes). Eine
 Untergruppe der einen Seite mit dieser UUID (der Wurzel-UUID der anderen Seite) wird Teil der
-Wurzel.
+Wurzel. Beim Abgleich heißen verschiedene Wurzeln aber meist: zwei unabhängig angelegte
+Datenbanken (z. B. zweimal neu angelegt). Ein Client führt sie deshalb nur auf ausdrücklichen
+Wunsch des Nutzers zusammen (Referenz: Kommandozeile `sync` bricht ohne
+`--merge-different-vault` ab, bevor etwas geschrieben wird).
 
 ### 5.3 Löschen gegen Ändern
 
@@ -491,6 +497,58 @@ schriebe ein Gerät mit älterer Fassung im Speicher z. B. eine in KeePassXC ver
 Schlüsselableitung oder geänderte Verlaufsgrenzen zurück und kürzte den Verlauf nach seinen
 alten Grenzen.
 
+### 5.8 Abgleich: Zeitstempel aus der Zukunft werden verweigert
+
+Entschieden 2026-10-17 (PROJECT-CONTEXT). Bearbeitet ein Gerät offline, während seine Uhr
+vorgeht, tragen die Änderungen Zeiten aus der Zukunft. Die Uhrprüfung beim Abgleich (Gerätezeit
+gegen `Date`-Header, höchstens `maxClockSkewMs` = 2 Minuten Abweichung) sieht davon nichts,
+wenn die Uhr inzwischen gestellt wurde – hochgeladen gewönnen diese Zeiten aber jeden Vergleich
+„neueste Änderung gewinnt“. Deshalb prüft jeder Client vor dem Zusammenführen:
+
+- **Gezählt** wird der späteste Zeitstempel der lokalen Fassung, der beim Zusammenführen
+  verglichen wird: `lastModification` und `locationChanged` aller Gruppen und Einträge (samt
+  Verlauf), jedes `w` und jedes `t` in `Ownwarden.FieldTimes` (auch aus ungültigen FieldTimes),
+  `LastModificationTime` aller CustomData-Einträge und eigenen Icons, `DatabaseNameChanged`,
+  `RecycleBinChanged` und alle Löschzeiten. Nicht: Ablauf, Erstellung, letzter Zugriff. Zeiten
+  außerhalb des KDBX-Bereichs (Abschnitt 3) zählen nicht. Referenz: `latestVaultTime` in
+  `core/src/merge/clock.ts`.
+- **Grenze:** max(Serverzeit aus dem `Date`-Header – fehlt er, die Gerätezeit –, spätester
+  Zeitstempel der Server-Datei nach derselben Zählung) + `maxClockSkewMs`. Gibt es die Datei
+  auf dem Server noch nicht: Gerätezeit + `maxClockSkewMs`. Die Server-Datei zählt mit, weil
+  ihre Zeiten (z. B. von KeePassXC auf einem Gerät mit falscher Uhr) beim Zusammenführen
+  ohnehin in jede lokale Fassung kommen; sonst verweigerte danach jedes Gerät dauerhaft.
+- **Liegt der Zeitstempel über der Grenze**, bricht der Abgleich ab, bevor zusammengeführt,
+  gesichert oder geschrieben wird (Referenz: `FutureTimestampsError` in `core/src/contracts.ts`,
+  Prüfung in `core/src/sync/sync.ts`). Es wird nichts geschrieben.
+- **Reparatur** (erst, wenn die Uhr stimmt): jeder Zeitstempel über der Grenze `limit` wird
+  `now` (ganze ms); betroffen sind alle oben gezählten Zeiten und dazu Erstellung und letzter
+  Zugriff, NIE das Ablaufdatum. `limit` = Gerätezeit + `maxClockSkewMs`. Die Fingerabdrücke `h`
+  in `Ownwarden.FieldTimes` bleiben (sie hängen nur von den Werten ab). Die betroffenen
+  Änderungen gelten danach als „jetzt“ gemacht und können gegen spätere Änderungen anderer
+  Geräte verlieren. Referenz: `restampFutureTimes` in `core/src/sync/future-times.ts`; in der
+  Kommandozeile `repair-times`.
+
+### 5.9 Abgleich: Sicherungskopien
+
+Kein alter Wert soll verloren gehen (PROJECT-CONTEXT, 2026-10-15). Für jeden Client gilt:
+
+- **Auf dem Server**, vor jedem Überschreiben: eine Kopie der gelesenen Fassung im Ordner
+  `ownwarden-backups/` neben der Datei, Name `<Basisname>.<UTC yyyyMMdd-HHmmss-SSS>.<Kennung>.kdbx`.
+  Die Kennung sind die ersten 6 Byte von SHA-256 über den ETag (UTF-8, genau wie vom Server
+  geliefert) als 12 Hex-Zeichen. Pro Fassung nur EINE Kopie: Liegt schon eine mit dieser
+  Kennung (und, falls der Server sie nennt, passender Größe) im Ordner, wird keine weitere
+  angelegt. Ohne Sicherung wird nie geschrieben. Aufgeräumt (die neuesten 20 bleiben) wird nur
+  nach einem erfolgreichen Schreiben und nur „best effort“; die Sicherung der eben
+  überschriebenen Fassung wird dabei nie gelöscht. Referenz: `core/src/sync/backup-names.ts`,
+  `WebDavAdapter.backup`/`pruneBackups` in `core/src/sync/webdav.ts`.
+- **Auf dem Gerät**, bevor das Ergebnis eines Abgleichs die lokale Kopie inhaltlich ersetzt:
+  eine Kopie der bisherigen lokalen Fassung. Nur dort steht eine Änderung, die das Gerät noch
+  nie hochgeladen hat; verliert sie beim Zusammenführen (z. B. gegen eine neuere Löschung), ist
+  sie sonst nirgends mehr. Die Server-Sicherungen enthalten nur frühere Server-Fassungen.
+  Referenz (Kommandozeile): `core/src/cli/local-backups.ts` – Ordner `ownwarden-local-backups/`
+  neben der Datei, die neuesten 10 bleiben. Wie die Erweiterung und Android das ablegen, ist
+  noch offen; dass sie es tun, gehört zum Vertrag.
+
 ## 6. Bearbeiten
 
 Ownwarden ändert eine Datenbank nur über `core/src/merge/vault-ops.ts`: wirksame
@@ -516,7 +574,7 @@ Datei ab: Jeder Abgleich schriebe erneut (mit Sicherungskopie). Abgelehnt werden
 
 - in **ungeschütztem Text** – Werte ungeschützter Felder (auch Passkey-Attribute), Namen von
   Feldern und Anhängen, Tags, CustomData-Schlüssel und -Werte, Gruppennamen, Farben,
-  OverrideURL – die in XML 1.0 verbotenen Zeichen U+0000–U+0008, U+000B, U+000C,
+  OverrideURL, der Name einer neuen Datenbank – die in XML 1.0 verbotenen Zeichen U+0000–U+0008, U+000B, U+000C,
   U+000E–U+001F, U+FFFE, U+FFFF und einzelne (ungepaarte) UTF-16-Surrogate. Genau diese
   entfernt der KDBX-Writer (`core/src/kdbx/xml-dom.ts`, `stripInvalidXmlChars`); KeePassXC
   liest sie nicht einmal als `&#n;`.

@@ -16,6 +16,9 @@
  *     ausgegeben oder abgefragt wird.
  *   - Die lokale Datei wird atomar geschrieben (atomic-file.ts): Ein Absturz hinterlässt nie
  *     eine halbe Datei.
+ *   - Bevor `sync` (oder `repair-times`) die lokale Datei inhaltlich ersetzt, kommt die
+ *     bisherige Fassung nach ownwarden-local-backups/ (local-backups.ts): Eine nie hochgeladene
+ *     Änderung, die beim Zusammenführen verliert, bleibt so wiederherstellbar (Review sync-1).
  *   - Geändert wird nur über die Funktionen aus vault-ops (über index.ts), damit die
  *     Feld-Zeitstempel stimmen.
  *
@@ -25,7 +28,6 @@
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import {
   ClockSkewError,
@@ -35,27 +37,34 @@ import {
   createNewVault,
   createVaultClock,
   DEFAULT_SYNC_SETTINGS,
+  findEntry,
+  FutureTimestampsError,
   KdbxError,
   mergeVaults,
   NULL_UUID,
   readKdbx,
   recycleEntry,
+  restampFutureTimes,
   setAttachment,
   setField,
   STANDARD_FIELDS,
   syncVault,
+  vaultsEquivalent,
   WebDavAdapter,
   writeKdbx,
   type Credentials,
   type Entry,
   type Group,
   type KdfParams,
+  type MergeVaults,
   type ProtectedString,
   type SyncResult,
   type Vault,
 } from "../index";
 import { describeUrl, parseStorageUrl } from "../sync/http";
 import { writeFileAtomic } from "./atomic-file";
+import { backupLocalFile, LOCAL_BACKUP_FOLDER, LOCAL_BACKUPS_TO_KEEP, type LocalBackupResult } from "./local-backups";
+import { isMainModule } from "./main-module";
 import { createPrompter } from "./prompt";
 
 // ---------------------------------------------------------------------------
@@ -111,9 +120,19 @@ Befehle:
                                                      (Pflicht für geschützte Felder wie Password)
   rm     <datei> <eintrag>                           in den Papierkorb (dort: endgültig löschen)
   attach <datei> <eintrag> <pfad> [--name <Name>]    Datei anhängen
-  sync   <datei> --url <WebDAV-Adresse der .kdbx-Datei> --user <Benutzername>
+  sync   <datei> --url <WebDAV-Adresse der .kdbx-Datei> --user <Benutzername> [--merge-different-vault]
                                                      mit dem Server abgleichen; fehlt die lokale
-                                                     Datei, wird die Server-Fassung geholt
+                                                     Datei, wird die Server-Fassung geholt.
+                                                     Ändert sich die lokale Datei, wird die bisherige
+                                                     vorher nach ${LOCAL_BACKUP_FOLDER}/ gesichert
+                                                     (die neuesten ${LOCAL_BACKUPS_TO_KEEP} bleiben).
+                                                     Eine ANDERE Datenbank auf dem Server (z. B. ein
+                                                     zweites „init“) wird nur mit --merge-different-vault
+                                                     zusammengeführt.
+  repair-times <datei>                               Zeitstempel aus der Zukunft (Geräteuhr ging beim
+                                                     Bearbeiten vor) auf jetzt setzen; danach gelten
+                                                     diese Änderungen als jetzt gemacht. Vorher die
+                                                     Uhr stellen! (sync verweigert solche Zeitstempel.)
 
 <eintrag> ist der Titel oder der Pfad "Gruppe/Titel".
 Felder: Title, UserName, Password, URL, Notes oder ein eigener Name (Groß-/Kleinschreibung zählt).
@@ -179,6 +198,7 @@ const COMMANDS: Record<string, Command> = {
   rm: commandRm,
   attach: commandAttach,
   sync: commandSync,
+  "repair-times": commandRepairTimes,
 };
 
 async function commandInit(args: string[], io: CliIo): Promise<void> {
@@ -314,7 +334,12 @@ async function commandAttach(args: string[], io: CliIo): Promise<void> {
 }
 
 async function commandSync(args: string[], io: CliIo): Promise<void> {
-  const { values, positionals } = parse("sync", args, { url: { type: "string" }, user: { type: "string" } }, ["datei"]);
+  const { values, positionals } = parse(
+    "sync",
+    args,
+    { url: { type: "string" }, user: { type: "string" }, "merge-different-vault": { type: "boolean" } },
+    ["datei"],
+  );
   if (values.url === undefined || values.user === undefined) throw new UsageError("sync: --url und --user sind nötig.");
   // Adresse prüfen, BEVOR sie ausgegeben oder ein Passwort abgefragt wird: Eine Adresse mit
   // Zugangsdaten darf nie im Terminal oder in einem Log landen (die Meldung nennt sie nicht).
@@ -344,9 +369,88 @@ async function commandSync(args: string[], io: CliIo): Promise<void> {
   }
   const local = await loadVault(file, credentials);
   const codec = createKdbxCodec(credentials);
-  const result = await syncVault(local, adapter, codec, { now: () => now(io), merge: mergeVaults, ...DEFAULT_SYNC_SETTINGS });
-  await saveVault(file, result.vault, credentials);
+  const merge = values["merge-different-vault"] === true ? mergeVaults : mergeSameDatabaseOnly;
+  let result: SyncResult;
+  try {
+    result = await syncVault(local, adapter, codec, { now: () => now(io), merge, ...DEFAULT_SYNC_SETTINGS });
+  } catch (error) {
+    if (error instanceof FutureTimestampsError) {
+      throw new CliError(`${error.message}\nReparieren (erst, wenn die Uhr stimmt): npm run proto -- repair-times ${file}`);
+    }
+    throw error;
+  }
   for (const line of syncSummary(result)) io.out(line);
+
+  // Review sync-1: Ändert der Abgleich die lokale Datei inhaltlich, zuerst die bisherige sichern.
+  // Sonst wäre eine nie hochgeladene Änderung, die beim Zusammenführen verloren hat (z. B. gegen
+  // eine neuere Löschung auf einem anderen Gerät), nirgends mehr zu finden.
+  if (!vaultsEquivalent(local, result.vault)) {
+    const backup = backupBeforeReplacing(file, io);
+    io.out(`Bisherige lokale Fassung gesichert: ${backup.path}`);
+    const removed = entriesWithPaths(local).filter(({ entry }) => findEntry(result.vault, entry.uuid) === undefined);
+    if (removed.length > 0) {
+      io.out(
+        `⚠️  Auf einem anderen Gerät gelöscht und deshalb hier entfernt: ${removed.map((item) => `„${item.path}“`).join(", ")}. ` +
+          "Wurde hier vorher noch etwas daran geändert, steht diese Fassung in der eben angelegten lokalen Sicherung.",
+      );
+    }
+    for (const warning of backup.warnings) io.out(`⚠️  ${warning}`);
+  }
+  await saveVault(file, result.vault, credentials);
+  io.out("Lokale Datei aktualisiert.");
+}
+
+/**
+ * mergeVaults, aber nur für zwei Fassungen DERSELBEN Datenbank (Review xc-6). Der Merge selbst
+ * behandelt verschiedene Wurzelgruppen als dieselbe (spec/README.md 5.2) und würde zwei
+ * unabhängig angelegte Datenbanken mit gleichem Master-Passwort still vereinigen – etwa nach
+ * einem zweiten `init` statt `sync` ohne lokale Datei, oder mit der Adresse eines anderen
+ * Test-Tresors. Ein Fehler hier bricht syncVault ab, bevor etwas gesichert oder geschrieben wird.
+ */
+const mergeSameDatabaseOnly: MergeVaults = (local, remote, options) => {
+  if (local.root.uuid !== remote.root.uuid) {
+    throw new CliError(
+      "Die lokale Datei und die Datei auf dem Server sind verschiedene Datenbanken (verschiedene Wurzelgruppen, z. B. " +
+        "zweimal mit „init“ angelegt). Es wurde nichts geschrieben. Einen weiteren Client bitte mit „sync“ OHNE lokale " +
+        "Datei starten (er holt dann die Server-Fassung). Sollen die beiden wirklich zu einer zusammengeführt werden: " +
+        "dieselbe Zeile mit --merge-different-vault.",
+    );
+  }
+  return mergeVaults(local, remote, options);
+};
+
+/** Zeitstempel aus der Zukunft reparieren (Entscheidung des Eigentümers 2026-10-17, Review merge-2/sync-2). */
+async function commandRepairTimes(args: string[], io: CliIo): Promise<void> {
+  const { positionals } = parse("repair-times", args, {}, ["datei"]);
+  const file = requireFile(positionals[0]!);
+  const credentials = await masterCredentials(io, file);
+  const vault = await loadVault(file, credentials);
+  const time = now(io);
+  // Dieselbe Grenze wie beim ersten Hochladen (Gerätezeit + erlaubte Abweichung). Deshalb muss die
+  // Uhr vorher stimmen: Geht sie noch vor, gilt deren „jetzt“.
+  const { vault: repaired, restamped } = restampFutureTimes(vault, time + DEFAULT_SYNC_SETTINGS.maxClockSkewMs, time);
+  if (restamped === 0) {
+    io.out(`Keine Zeitstempel aus der Zukunft gefunden (Gerätezeit ${new Date(time).toISOString()}) – nichts geändert.`);
+    return;
+  }
+  const backup = backupBeforeReplacing(file, io);
+  await saveVault(file, repaired, credentials);
+  io.out(`${restamped} Zeitstempel aus der Zukunft auf jetzt (${new Date(time).toISOString()}) gesetzt.`);
+  io.out("Die betroffenen Änderungen gelten damit als eben gemacht; ein Abgleich ist jetzt wieder möglich.");
+  io.out(`Bisherige Fassung gesichert: ${backup.path}`);
+  for (const warning of backup.warnings) io.out(`⚠️  ${warning}`);
+}
+
+/** Lokale Sicherung vor dem Ersetzen; scheitert sie, bleibt die lokale Datei, wie sie ist. */
+function backupBeforeReplacing(file: string, io: CliIo): LocalBackupResult {
+  try {
+    return backupLocalFile(file, now(io));
+  } catch (error) {
+    throw new CliError(
+      `Die bisherige lokale Datei ließ sich nicht sichern (${describeError(error)}); sie wurde deshalb NICHT ersetzt. ` +
+        "Ein Abgleich mit dem Server ist nicht verloren: Der nächste „sync“ holt sein Ergebnis wieder.",
+    );
+  }
 }
 
 /** Lokale Datei fehlt: die Fassung vom Server holen (neuer Client, z. B. „Chrome“). */
@@ -380,7 +484,6 @@ function syncSummary(result: SyncResult): string[] {
     if (report.orphansRecovered > 0) lines.push(`${report.orphansRecovered} Einträge in die Gruppe „Wiederhergestellt (Ownwarden)“ gerettet.`);
   }
   for (const warning of result.warnings ?? []) lines.push(`⚠️  ${warning}`);
-  lines.push("Lokale Datei aktualisiert.");
   return lines;
 }
 
@@ -585,13 +688,9 @@ function displayInline(value: ProtectedString | undefined): string {
 // Start als Programm
 // ---------------------------------------------------------------------------
 
-/** true, wenn diese Datei direkt gestartet wurde (nicht importiert, z. B. aus einem Test). */
-function isMainModule(): boolean {
-  const script = process.argv[1];
-  return script !== undefined && import.meta.url === pathToFileURL(resolve(script)).href;
-}
-
-if (isMainModule()) {
+// Nur, wenn diese Datei direkt gestartet wurde (nicht importiert, z. B. aus einem Test);
+// auch über einen Symlink (main-module.ts).
+if (isMainModule(import.meta.url)) {
   const prompter = createPrompter();
   const io: CliIo = {
     env: process.env,

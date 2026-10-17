@@ -70,6 +70,16 @@ describe("createNewVault", () => {
     expect(createNewVault({ name: "x", now: NOW, kdf: TEST_KDF }).settings.kdf).toEqual(TEST_KDF);
     expect(() => createNewVault({ name: "x", now: NOW, kdf: { ...TEST_KDF, memoryBytes: 1 } })).toThrow(KdbxError);
   });
+
+  // Review kdbx-2 (Entscheidung 2026-10-17: ablehnen, nie still verändern). Der Name landet in
+  // <DatabaseName> und als Name der Wurzelgruppe; der Writer entfernt solche Zeichen. Sonst wiche
+  // die Datenbank im Speicher von der Datei ab, und jeder Abgleich schriebe erneut (mit Sicherung).
+  it("lehnt einen Namen mit Zeichen ab, die KDBX nicht speichern kann", () => {
+    for (const name of ["Tresor\u000Bneu", "a\u0000", "￾", "x\uD800"]) {
+      expect(() => createNewVault({ name, now: NOW, kdf: TEST_KDF }), JSON.stringify(name)).toThrow(RangeError);
+    }
+    expect(createNewVault({ name: "Tab\tZeile\nEmoji 🔑", now: NOW, kdf: TEST_KDF }).meta.databaseName).toBe("Tab\tZeile\nEmoji 🔑");
+  });
 });
 
 describe("readKdbx / writeKdbx", () => {

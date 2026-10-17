@@ -44,7 +44,9 @@ Nicht geplant: Teilen/Organisationen, Send, Notfallzugriff, Web-Vault, eigener S
   Die Anbindung „lokale Datei“ nur für Tests. OneDrive, Google Drive und Dropbox sind nicht geplant.
 - **Übergang:** Bitwarden bleibt bis Version 1 in Benutzung. Bis zum Umzug arbeitet Ownwarden ausschließlich mit
   Testdateien. Voraussetzung für den Umzug: alle Merge-Testfälle aus `spec/` grün, auch gegen Dateien, die
-  KeePassXC verändert hat.
+  KeePassXC verändert hat. Als Nachweis zählt nur ein Testlauf, in dem kein Interop-Test übersprungen wurde
+  (`OWNWARDEN_REQUIRE_TOOLS=1 npm test`; ohne die Variable werden Tests ohne `keepassxc-cli` bzw. PHP still
+  übersprungen).
 
 ## Sync-Regel: neueste Änderung gewinnt – pro Feld
 KDBX speichert Zeitstempel nur pro Eintrag und Gruppe, nicht pro Feld. Ownwarden ergänzt deshalb eigene
@@ -83,10 +85,14 @@ ignoriert werden muss.
   pro Abgleich, wenn beide Geräte verschiedene Felder geändert haben (entschieden 2026-10-15: kein alter Wert soll
   verloren gehen). Verläufe beider Seiten werden nach Zeitstempel (ganze Sekunden) vereinigt und von Doppelten befreit. Die Grenzen aus der
   Datei (`HistoryMaxItems`, `HistoryMaxSize`) gelten, ältere Fassungen fallen also irgendwann heraus. Gewinnt eine
-  Löschung, sind die Daten aus der Datei weg und nur noch in Backups.
-- **Uhren:** Neue Zeitstempel nie kleiner als der größte bekannte Zeitstempel + 1 ms. Zusätzlich die Gerätezeit gegen
-  den `Date`-Header des WebDAV-Servers prüfen; bei deutlicher Abweichung warnen, statt still zu schreiben
-  (Schwellwert im Prototyp festlegen).
+  Löschung, sind die Daten aus der Datei weg und nur noch in Sicherungskopien: frühere Server-Fassungen in den
+  Backups auf dem Server; eine Änderung, die ein Gerät noch nie hochgeladen hatte, aber NUR in dessen lokaler
+  Sicherung vor dem Abgleich (die Server-Backups enthalten nur Server-Fassungen; entschieden 2026-10-17, siehe
+  unten). Die Kommandozeile nennt Einträge, die ein Abgleich lokal entfernt, mit ⚠️.
+- **Uhren:** Neue Zeitstempel nie kleiner als der größte bekannte Zeitstempel + 1 ms (höchstens bis zum Ende des
+  KDBX-Zeitbereichs). Die Gerätezeit wird gegen den `Date`-Header des WebDAV-Servers geprüft: Weicht sie mehr als
+  2 Minuten ab, verweigert der Abgleich, statt still zu schreiben. Ging die Uhr schon beim Bearbeiten vor, verweigert
+  er ebenfalls (Zeitstempel aus der Zukunft; Reparatur siehe „Entscheidungen nach dem Review“).
 - **Datenbank-Einstellungen ohne Zeitstempel** (Verschlüsselung, Schlüsselableitung, Kompression,
   `HistoryMaxItems`/`HistoryMaxSize`, übrige Meta-Angaben wie die Beschreibung): Die Fassung der Datei auf dem Server
   gewinnt (entschieden 2026-10-15). Ownwarden ändert diese Einstellungen in Version 1 nicht; so kann ein Gerät mit
@@ -100,10 +106,18 @@ ignoriert werden muss.
 - Nur bedingt: WebDAV `PUT` mit `If-Match` und dem ETag genau so, wie der Server ihn geliefert hat. Bei `412`: neu
   laden, zusammenführen, erneut schreiben. Die allererste Datei wird mit `If-None-Match: *` angelegt (`If-Match` auf
   eine nicht vorhandene Datei liefert ebenfalls `412`).
-- Vor jedem Schreiben ein Backup der vorherigen Fassung per WebDAV `COPY` in `ownwarden-backups/` neben der Datei.
-  Ohne erfolgreiches Backup wird nie geschrieben. Das Aufräumen alter Backups (Standard: die letzten 20 behalten)
-  ist dagegen „best effort“: Scheitert es, läuft der Sync weiter und meldet eine Warnung (festgelegt 2026-10-16).
-- Standardwerte: höchstens 5 Versuche bei gleichzeitigem Schreiben (412), erlaubte Uhrabweichung 2 Minuten.
+- Vor jedem Schreiben ein Backup der vorherigen Fassung per WebDAV `COPY` in `ownwarden-backups/` neben der Datei,
+  und zwar EINES pro Fassung (Kennung aus dem ETag im Namen): Gescheiterte Schreibversuche (423, 5xx,
+  Zeitüberschreitung, 412) legen so keine weiteren Kopien derselben Fassung an, die ältere, verschiedene Fassungen
+  verdrängen. Ohne erfolgreiches Backup wird nie geschrieben. Das Aufräumen alter Backups (Standard: die letzten 20
+  behalten) kommt erst nach einem erfolgreichen Schreiben, löscht nie das Backup der eben überschriebenen Fassung und
+  ist „best effort“: Scheitert es, läuft der Sync weiter und meldet eine Warnung (festgelegt 2026-10-16).
+- Bevor ein Abgleich die lokale Kopie eines Clients inhaltlich ersetzt, sichert der Client die bisherige lokal
+  (entschieden 2026-10-17; Kommandozeile: `ownwarden-local-backups/`, die neuesten 10).
+- Standardwerte: höchstens 5 Versuche bei gleichzeitigem Schreiben (412), erlaubte Uhrabweichung 2 Minuten,
+  Zeitlimit gegen Stillstand 25 s (kein Limit für die ganze Übertragung; unter den 30 s des Service Workers).
+- Regeln, die jede Implementierung (auch Kotlin) einhalten muss: `spec/README.md` 5.7 (Einstellungen der
+  Server-Datei gewinnen), 5.8 (Zeitstempel aus der Zukunft), 5.9 (Sicherungskopien).
 
 ## Passkeys
 - Gespeichert im Attributschema von KeePassXC: `KPEX_PASSKEY_USERNAME`, `KPEX_PASSKEY_CREDENTIAL_ID`,
@@ -122,6 +136,9 @@ ignoriert werden muss.
 - Der unverschlüsselte Bitwarden-JSON-Export enthält Passkeys (`fido2Credentials`) mit dem privaten Schlüssel im
   Klartext. Die Datei ist hochsensibel und muss nach dem Import gelöscht werden.
 - KeePassXC importiert Passkeys aus diesem Export nicht – Ownwarden braucht einen eigenen Importer.
+- Zeichen, die KDBX nicht speichern kann (Steuerzeichen außer Tab/LF/CR, U+FFFE/U+FFFF, einzelne Surrogate), lehnt
+  der Kern ab (`RangeError`, entschieden 2026-10-17). Der Importer muss betroffene Einträge melden oder nachfragen,
+  statt Werte still zu ändern.
 - Umzurechnen bzw. festzulegen: Credential-ID (GUID → 16 Byte oder base64url mit Präfix `b64.`), privater Schlüssel
   (base64 PKCS#8 → PEM), mehrere URIs pro Login, doppelte Namen eigener Felder (in KDBX nicht erlaubt), Favoriten
   (in KDBX kein eingebautes Merkmal), Eintragstypen ohne Gegenstück, Zählerstände.
@@ -143,6 +160,18 @@ ignoriert werden muss.
 - Clickjacking: Auf der DEF CON 33 (2025) wurden Passwortmanager-Erweiterungen (u. a. KeePassXC-Browser) über
   unsichtbare Overlays ausgetrickst. Autofill-Oberflächen direkt im DOM der Seite sind das anfällige Muster und
   brauchen Gegenmaßnahmen.
+- Folgen für die Erweiterung aus dem Prototyp (Review 2026-10-17, Einzelheiten in `core/README.md`, „Bekannte
+  Grenzen“):
+  - Das WebDAV-Zeitlimit (25 s gegen Stillstand) beendet hängende Anfragen vor der 30-s-Grenze. Ein großer Upload
+    auf langsamer Leitung (Tresor von einigen MB mit Anhängen) kann aber länger dauern, bis die Antwort kommt –
+    solche Abgleiche gehören in eine Erweiterungsseite oder ein Offscreen-Dokument, nicht in den Service Worker.
+  - Argon2 läuft in hash-wasm auf EINEM Thread; schon 64 MiB × 512 Durchläufe dauern etwa 38 s. Dateien über
+    2^25 KiB × Durchläufe lehnt der Kern ab. In KeePassXC eingestellte „Entschlüsselungszeiten“ gelten für alle
+    Threads und dauern in Ownwarden bis zu Parallelität-mal so lang.
+  - Der KDBX-Kopf ist ohne Schlüssel geprüft: Wer Schreibrecht im WebDAV-Ordner hat, kann ohne Passwort eine
+    teure Schlüsselableitung erzwingen (bis 2 GiB / etwa 1 min), danach meldet die Prüfung „falsches Passwort“.
+    Geplant: die zuletzt erfolgreich geprüften KDF-Parameter je Tresor merken, bei Abweichung „Datei wurde verändert
+    oder neu verschlüsselt“ melden und vor einer viel teureren Ableitung nachfragen.
 
 **Android:**
 - Autofill Framework (ab Android 8) füllt native Apps. **In Chrome** nur, wenn der Nutzer in den Chrome-Einstellungen
@@ -177,7 +206,9 @@ ignoriert werden muss.
 - MagentaCLOUD unterstützt bedingtes Schreiben mit `If-Match` (für Nextcloud im Quellcode belegt, für den
   Telekom-Betrieb nicht). Nutzer berichteten nach der Umstellung 2021 von unzuverlässigem WebDAV.
 - MagentaCLOUD-WebDAV funktioniert laut Forenbeiträgen nicht mit einer externen E-Mail-Adresse als Telekom-Login.
-- Ein abgebrochener Upload lässt die bisherige Datei auf dem Server unverändert.
+- Ein abgebrochener Upload lässt die bisherige Datei auf dem Server unverändert. (Prüfen mit dem Servertest
+  `--abort-test`: Er lädt seit 2026-10-17 wie der echte Abgleich mit `Content-Length` hoch und bricht nach der Hälfte
+  ab. Antwortet der Server schon vorher, meldet er ⚠️ „nicht geprüft“ – das zählt NICHT als bestätigt.)
 - Der Bitwarden-JSON-Export enthält keine Anhänge (vermutlich; prüfen).
 
 ## Bestätigte Fakten (durch Tests gegen KeePassXC 2.7.6, Stand 2026-10-15)
@@ -193,10 +224,36 @@ ignoriert werden muss.
 - Änderungen in KeePassXC (Felder, Anhänge, Verschieben) erkennt Ownwarden feldgenau als externe Änderung.
 - Eine von KeePassXC gespeicherte Datei kommt durch Ownwarden (lesen + schreiben) inhaltlich unverändert heraus.
 
+## Entscheidungen nach dem Review (2026-10-17)
+Ein Code-Review des Prototyps (mit Claude; kein Review durch einen zweiten Anbieter) ergab 32 Befunde (31 bestätigt,
+1 unsicher; nach der Prüfung 3 schwer, 7 mittel, 22 leicht). Der Eigentümer hat entschieden („Schwer + mittel +
+einfache leichte“):
+- **Umfang:** Alle schweren und mittleren Befunde werden behoben, dazu die einfachen leichten. Leichte Befunde, die
+  aufwendige Änderungen bräuchten, werden nur dokumentiert (`core/README.md` „Bekannte Grenzen“,
+  `spec/README.md` Abschnitt 10).
+- **Falsch gehende Geräteuhr:** Enthält die lokale Datenbank Zeitstempel, die später liegen als die Serverzeit (beim
+  ersten Hochladen: die Gerätezeit) + 2 Minuten, verweigert der Abgleich: Er schreibt nichts und meldet das
+  verständlich auf Deutsch. Eine Reparatur setzt solche Zeitstempel auf „jetzt“; die Änderungen gelten danach als
+  jetzt gemacht. Die Kommandozeile hat dafür `repair-times`. Umgesetzt mit einer Ausnahme: Enthält schon die
+  Server-Datei solche Zeitstempel (z. B. von KeePassXC auf einem Gerät mit falscher Uhr), zählt deren spätester als
+  Serverzeit – sonst könnte kein Gerät mehr abgleichen (`spec/README.md` 5.8).
+- **Doppelte UUIDs in einer Datei:** Beim Lesen bekommt das SPÄTERE Vorkommen (Dokumentreihenfolge) eine neue UUID,
+  deterministisch abgeleitet (auf jedem Gerät, das dieselbe Datei liest, dieselbe); es geht nichts verloren, das
+  nächste Speichern repariert die Datei. Die genaue Regel (für Kotlin) steht in `spec/README.md` 5.2.
+- **Zeichen, die KDBX nicht speichern kann:** werden schon bei der Eingabe abgelehnt (`RangeError` mit deutscher
+  Meldung); Daten des Nutzers werden nie still verändert.
+- **Lokale Sicherung vor dem Abgleich:** Bevor ein Abgleich die lokale Kopie ersetzt, sichert der Client die
+  bisherige (Kommandozeile: rotierend, die neuesten 10). Sonst ginge eine nie hochgeladene Änderung, die gegen eine
+  neuere Löschung verliert, unwiederbringlich verloren.
+- **Einträge ohne gültige Feld-Zeitstempel auf BEIDEN Seiten:** Die Seite mit der neueren `lastModification` (ganze
+  Sekunden) bestimmt, welche Felder fehlen (`spec/README.md` 5.1, Testfall 32).
+
 ## Aktuelle Phase
 Phase 0 – Prototyp des TypeScript-Kerns, gebaut in Etappen (jede mit kritischer Prüfung):
 1. KDBX4-Container ✅  2. XML-Modell ✅  3. Feld-Merge ✅  4. WebDAV-Sync ✅  5. Zusammenführen, CLI, Anleitung ✅
-Stand 2026-10-16: 959 Tests grün (gegen KeePassXC 2.7.6 und einen SabreDAV-Testserver). Nur für Testdaten gedacht.
+6. Review und Korrekturen ✅ (siehe „Entscheidungen nach dem Review“)
+Stand 2026-10-17: 1357 Tests grün, keiner übersprungen (Lauf mit `OWNWARDEN_REQUIRE_TOOLS=1`, gegen KeePassXC
+2.7.6 und einen SabreDAV-Testserver). `core/` braucht Node ≥ 22.12. Nur für Testdaten gedacht.
 Nächster Schritt: Prüfskript (`core/README.md`) gegen echte MagentaCLOUD und Nextcloud mit einem Test-Zugang.
 
 ## Repo-Struktur

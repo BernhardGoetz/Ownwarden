@@ -17,6 +17,8 @@
  *     dann AES-KDF mit einigen Millionen Runden (abhängig vom Rechner).
  *   - Ist KeePassXC nicht installiert, sollen Tests sauber übersprungen werden:
  *       describe.skipIf(!hasKeepassxc())("…", () => { … })
+ *     Mit OWNWARDEN_REQUIRE_TOOLS=1 (strenger Modus, siehe toolAvailable) ist das Fehlen dagegen
+ *     ein Fehler.
  *   - Temporäre Dateien gehören nach core/test/.tmp/<eigener Unterordner> (siehe createTmpDir).
  */
 import { spawn, spawnSync } from "node:child_process";
@@ -38,6 +40,22 @@ export const TMP_ROOT = join(CORE_DIR, "test", ".tmp");
 // Grundfunktionen
 // ---------------------------------------------------------------------------
 
+/**
+ * Strenger Modus (Review xc-8): Mit OWNWARDEN_REQUIRE_TOOLS=1 ist ein fehlendes Werkzeug
+ * (keepassxc-cli; PHP/SabreDAV für den WebDAV-Testserver) ein FEHLER statt eines übersprungenen
+ * Tests. Sonst gilt ein Lauf auf einem Rechner ohne diese Werkzeuge als grün, obwohl kein
+ * einziger Interop-Test lief. Vor dem Umzug (PROJECT-CONTEXT) und in CI immer so laufen lassen.
+ */
+export const REQUIRE_TOOLS_ENV = "OWNWARDEN_REQUIRE_TOOLS";
+
+/** Liefert `available`; im strengen Modus wirft es stattdessen, wenn das Werkzeug fehlt. */
+export function toolAvailable(available: boolean, tool: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!available && env[REQUIRE_TOOLS_ENV] === "1") {
+    throw new Error(`${tool} fehlt, aber ${REQUIRE_TOOLS_ENV}=1 verlangt, dass alle Interop-Tests laufen (statt übersprungen zu werden).`);
+  }
+  return available;
+}
+
 let available: boolean | undefined;
 
 /** true, wenn `keepassxc-cli` aufrufbar ist. Das Ergebnis wird zwischengespeichert. */
@@ -46,7 +64,7 @@ export function hasKeepassxc(): boolean {
     const result = spawnSync(KPXC_BIN, ["--version"], { encoding: "utf8" });
     available = result.error === undefined && result.status === 0;
   }
-  return available;
+  return toolAvailable(available, `KeePassXC (Programm „${KPXC_BIN}“)`);
 }
 
 /** Ergebnis eines Aufrufs von `keepassxc-cli`. */

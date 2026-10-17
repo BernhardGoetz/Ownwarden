@@ -123,4 +123,35 @@ describe("syncVault mit KDBX-Dateien", () => {
 
     expect(result.written).toBe(false);
   });
+
+  // Review xc-4: Eine Fassung im Speicher trägt Zeiten an CustomData-Einträgen (z. B. aus einer
+  // 4.1-Datei gelesen), die Datei auf dem Server ist KDBX 4.0 (z. B. ältere Sicherung
+  // zurückgespielt). 4.0 kann diese Zeiten nicht speichern; bisher schrieb deshalb JEDER Abgleich
+  // neu (samt Sicherungskopie), solange das Gerät result.vault weiterverwendete.
+  it("Zeiten an CustomData-Einträgen, die KDBX 4.0 nicht speichern kann, lösen nicht bei jedem Abgleich ein Schreiben aus", async () => {
+    const start = T0 + 42;
+    const storage = storageAt(start);
+    const vivaldi = device("Vivaldi", storage, start);
+    const initial = newVault();
+    createEntry(initial, initial.root.uuid, { Title: "Mail" }, vivaldi.clock(initial), { uuid: uuidFromName("mail") });
+    await syncVault(initial, vivaldi.adapter, codec, vivaldi.options());
+    expect((await codec.decode(storage.current()!.data)).settings.versionMinor).toBe(0);
+
+    let local = await codec.decode(storage.current()!.data);
+    local.meta.customData.set("KPXC_DECRYPTION_TIME_PREFERENCE", { value: "1000", lastModified: start });
+    entryByTitle(local, "Mail").customData.set("Farbe", { value: "rot", lastModified: start });
+    local.root.customData.set("Sortierung", { value: "a", lastModified: start });
+    const first = await syncVault(local, vivaldi.adapter, codec, vivaldi.options());
+    expect(first.written).toBe(true); // neue Schlüssel: einmal schreiben ist richtig
+    expect(first.vault.meta.customData.get("KPXC_DECRYPTION_TIME_PREFERENCE")?.lastModified).toBe(start);
+    local = first.vault;
+
+    for (let round = 0; round < 3; round++) {
+      const result = await syncVault(local, vivaldi.adapter, codec, vivaldi.options());
+      expect(result.written).toBe(false);
+      local = result.vault;
+    }
+    expect(vivaldi.adapter.stats.writes).toBe(2);
+    expect(storage.backups).toHaveLength(1);
+  });
 });

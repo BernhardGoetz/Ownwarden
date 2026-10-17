@@ -2,6 +2,7 @@
  * WebDavAdapter und syncVault gegen den SabreDAV-Testserver (tools/webdav-test-server), der
  * sich beim Schreiben wie Nextcloud verhält. Wird übersprungen, wenn PHP/Composer fehlen.
  */
+import { createHash } from "node:crypto";
 import { connect } from "node:net";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -311,6 +312,49 @@ describe.skipIf(!webDavTestServerAvailable())("syncVault über WebDAV mit echten
     const again = await syncVault(vaultA, vivaldi, codec, options());
     expect(again.written).toBe(false);
     expect(entryByTitle(again.vault, "Mail").strings.get("Password")?.value).toBe("neu");
+  });
+
+  // Review xc-1, Variante zu test/review/cross-1.test.ts (dort 423): Ein strenger Server mit
+  // schwachen ETags beantwortet JEDES bedingte Schreiben mit 412 – maxAttempts Versuche pro
+  // Abgleich, jeder liest dieselbe Fassung. Davon darf es nur EINE Kopie geben, und keine ältere,
+  // verschiedene Sicherung darf dafür verschwinden.
+  it("dauerhaft 412 auf die Tresor-Datei: eine Kopie pro Fassung, keine ältere Sicherung verdrängt", async () => {
+    const codec = createKdbxCodec({ password: "Tresor-Testpasswort" });
+    const fileUrl = new URL("Streng/tresor.kdbx", server.baseUrl).href;
+    const backupDir = join(server.dataDir, "Streng", "ownwarden-backups");
+    mkdirSync(join(server.dataDir, "Streng"));
+    const keep = 3;
+    const options = (): SyncOptions => ({ now: () => Date.now(), merge: mergeVaults, maxAttempts: 5, maxClockSkewMs: 120_000, backupsToKeep: keep });
+    let rejecting = false;
+    const strictFetch: typeof fetch = async (input, init) => {
+      if (rejecting && init?.method === "PUT" && String(input) === fileUrl) return new Response(null, { status: 412 });
+      return fetch(input, init);
+    };
+    const adapter = new WebDavAdapter({ fileUrl, username: server.username, password: server.password, fetch: strictFetch });
+    const distinct = () => new Set(readdirSync(backupDir).map((name) => createHash("sha256").update(readFileSync(join(backupDir, name))).digest("hex"))).size;
+
+    let vault = newVault();
+    const mail = createEntry(vault, vault.root.uuid, { Title: "Mail", Password: "v0" }, createVaultClock(vault)).uuid;
+    vault = (await syncVault(vault, adapter, codec, options())).vault;
+    for (const version of ["v1", "v2", "v3"]) {
+      setField(vault, mail, "Password", version, {}, createVaultClock(vault));
+      vault = (await syncVault(vault, adapter, codec, options())).vault;
+    }
+    expect(distinct()).toBe(keep);
+
+    rejecting = true;
+    for (let round = 1; round <= 3; round++) {
+      setField(vault, mail, "Password", `offline-${round}`, {}, createVaultClock(vault));
+      await expect(syncVault(vault, adapter, codec, options())).rejects.toBeInstanceOf(PreconditionFailedError);
+    }
+    // 15 gescheiterte Versuche über dieselbe Fassung: genau eine Kopie dazu, nichts gelöscht.
+    expect(readdirSync(backupDir)).toHaveLength(keep + 1);
+    expect(distinct()).toBe(keep + 1);
+
+    rejecting = false;
+    setField(vault, mail, "Password", "endlich", {}, createVaultClock(vault));
+    expect((await syncVault(vault, adapter, codec, options())).written).toBe(true);
+    expect(readdirSync(backupDir)).toHaveLength(keep); // aufgeräumt erst nach dem Schreiben
   });
 
   it("http:// auf einen fremden Rechner wird abgelehnt (auch bei laufendem Server)", () => {

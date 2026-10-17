@@ -49,6 +49,7 @@ describe.skipIf(!webDavTestServerAvailable())("WebDAV-Servertest gegen SabreDAV"
       propfind: "ok",
       copy: "ok",
       delete: "ok",
+      backups: "ok",
       abort: "ok",
       cleanup: "ok",
     });

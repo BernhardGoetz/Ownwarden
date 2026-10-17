@@ -32,7 +32,8 @@ schützen zusätzlich, falls das Skript einmal hinter einem anderen Webserver l�
 Die Tests starten den Server selbst über `core/test/helpers/webdav-server.ts`
 (`startWebDavTestServer()`): freier Port, eigener Datenordner unter `core/test/.tmp/`, zufälliges
 Testpasswort. Fehlt der Ordner `vendor/`, führt die Hilfe einmal `composer install` aus. Sind PHP
-oder Composer nicht installiert, werden die Tests übersprungen.
+oder Composer nicht installiert, werden die Tests übersprungen – außer mit
+`OWNWARDEN_REQUIRE_TOOLS=1` (strenger Modus, siehe `core/README.md`): Dann ist das ein Fehler.
 
 Voraussetzungen: PHP ≥ 8.1 mit den Erweiterungen `dom`, `xmlreader`, `xmlwriter`, `simplexml`,
 `mbstring`, `ctype`, `iconv`; Composer.

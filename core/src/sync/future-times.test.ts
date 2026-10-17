@@ -83,6 +83,9 @@ describe("restampFutureTimes", () => {
     setField(other, MAIL, "Password", "wirklich neuer", {}, createVaultClock(other, () => NOW + 600_000));
     const merged = mergeVaults(repaired, other, { now: NOW + 660_000 }).vault;
     expect(entryByTitle(merged, "Mail").strings.get("Password")?.value).toBe("wirklich neuer");
+    // Auch Fassungen, die jetzt dieselbe Zeit tragen, bleiben im Verlauf (verschiedener Inhalt).
+    const passwords = entryByTitle(merged, "Mail").history.map((version) => version.strings.get("Password")?.value);
+    expect(passwords).toEqual(expect.arrayContaining(["alt", "neu", "noch neuer"]));
     // Ohne Reparatur hätte die Änderung mit der falschen Uhr gewonnen.
     expect(entryByTitle(mergeVaults(future, other, { now: NOW + 660_000 }).vault, "Mail").strings.get("Password")?.value).toBe("noch neuer");
   });

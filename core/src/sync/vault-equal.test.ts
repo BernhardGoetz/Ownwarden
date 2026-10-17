@@ -98,6 +98,34 @@ describe("vaultsEquivalent: gilt als gleich", () => {
     b.settings.kdf.rounds = 2000;
     expect(vaultsEquivalent(a, b)).toBe(false);
   });
+
+  // Review xc-4: KDBX 4.0 kann diese Zeiten nicht speichern (der Schreiber lässt sie weg).
+  it("KDBX 4.0: Zeiten an CustomData-Einträgen zählen nicht; braucht die Datenbank 4.1, zählen sie", () => {
+    const fromFile = newVault({ root: newGroup({ uuid: uuidFromName("root"), entries: [newEntry({ uuid: uuidFromName("e1"), title: "Mail" })] }) });
+    fromFile.meta.customData.set("Meta", { value: "1" });
+    fromFile.root.customData.set("Gruppe", { value: "2" });
+    fromFile.root.entries[0]!.customData.set("Eintrag", { value: "3" });
+    const inMemory = cloneVault(fromFile);
+    inMemory.meta.customData.get("Meta")!.lastModified = T0;
+    inMemory.root.customData.get("Gruppe")!.lastModified = T0;
+    inMemory.root.entries[0]!.customData.get("Eintrag")!.lastModified = T0;
+    expect(vaultsEquivalent(inMemory, fromFile)).toBe(true);
+    expect(vaultsEquivalent(fromFile, inMemory)).toBe(true);
+    // Der Wert zählt weiterhin.
+    const otherValue = cloneVault(inMemory);
+    otherValue.meta.customData.get("Meta")!.value = "anders";
+    expect(vaultsEquivalent(otherValue, fromFile)).toBe(false);
+
+    // 4.1 (eingestellt oder wegen eines 4.1-Merkmals nötig): die Zeiten werden gespeichert und zählen.
+    const v41 = (vault: Vault) => ({ ...vault, settings: { ...vault.settings, versionMinor: 1 as const } });
+    expect(vaultsEquivalent(v41(inMemory), v41(fromFile))).toBe(false);
+    const tagged = (vault: Vault) => {
+      const copy = cloneVault(vault);
+      copy.root.tags = ["4.1"];
+      return copy;
+    };
+    expect(vaultsEquivalent(tagged(inMemory), tagged(fromFile))).toBe(false);
+  });
 });
 
 describe("vaultsEquivalent: erkennt echte Unterschiede", () => {

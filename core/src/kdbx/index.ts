@@ -25,6 +25,7 @@ import { createInnerStream, newInnerStreamKey } from "./inner-stream";
 import { validateKdfParams } from "./kdf";
 import { defaultKdbxSettings } from "./settings";
 import { kdbxMinorVersionRequired, parseVaultXml, serializeVaultXml } from "./xml";
+import { stripInvalidXmlChars } from "./xml-dom";
 
 export { defaultKdbxSettings } from "./settings";
 export { kdbxMinorVersionRequired } from "./xml";
@@ -107,6 +108,15 @@ export interface NewVaultOptions {
 export function createNewVault(options: NewVaultOptions): Vault {
   const now = Math.floor(options.now / 1000) * 1000;
   if (!Number.isFinite(now)) throw new RangeError("createNewVault: ungültige Zeit now.");
+  // Wie in vault-ops (Review kdbx-2): Zeichen, die der Writer entfernen müsste, ablehnen statt
+  // still verändern – sonst wiche die Datenbank im Speicher von der Datei ab, und jeder Abgleich
+  // schriebe erneut.
+  if (stripInvalidXmlChars(options.name) !== options.name) {
+    throw new RangeError(
+      "Der Datenbankname enthält ein Zeichen, das KDBX nicht speichern kann. Nicht erlaubt sind Steuerzeichen außer " +
+        "Tabulator und Zeilenumbruch, U+FFFE, U+FFFF und einzelne UTF-16-Surrogate.",
+    );
+  }
   const settings = defaultKdbxSettings();
   if (options.kdf !== undefined) {
     validateKdfParams(options.kdf);

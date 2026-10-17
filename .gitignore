@@ -7,6 +7,24 @@ vendor/
 *.kdbx
 !spec/**/*.kdbx
 !core/test/fixtures/**/*.kdbx
+# Temporärdatei des atomaren Schreibens (core/src/cli/atomic-file.ts), z. B. ".test.kdbx.0a1b2c3d4e5f.tmp":
+# Nach einem Absturz beim Speichern bleibt sie als vollständige (verschlüsselte) Kopie liegen.
+*.kdbx.*.tmp
+# Lokale Sicherungskopien der Kommandozeile (core/src/cli/local-backups.ts)
+ownwarden-local-backups/
+# Zugangsdaten: Umgebungsdateien (z. B. mit OWNWARDEN_WEBDAV_PASSWORD) und Schlüsseldateien
+.env
+.env.*
+!.env.example
+*.key
+*.keyx
+# Klartext-Exporte: Bitwarden-JSON-Export (hochsensibel, enthält private Passkey-Schlüssel) und
+# KeePassXC-Exporte als XML/CSV dort, wo die Anleitung arbeitet (Repo-Wurzel, core/)
+bitwarden_export_*.json
+/*.xml
+/*.csv
+core/*.xml
+core/*.csv
 # Testdaten, die Tests zur Laufzeit erzeugen
 core/test/.tmp/
 tools/webdav-test-server/data/

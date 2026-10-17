@@ -157,20 +157,24 @@ export interface MergeResult {
  * verändert `local` und `remote` nicht.
  *
  * Unabhängig davon, welche Seite `local` und welche `remote` ist (merge(a, b) und merge(b, a)
- * liefern dasselbe): welche Einträge, Gruppen und Lösch-Vermerke das Ergebnis enthält, jedes
- * Feld eines Eintrags samt Feld-Zeitstempeln, der Verlauf, die Eigenschaften und die Position
- * jeder Gruppe, die Meta-Angaben mit Zeitstempel (Datenbankname, Papierkorb, eigene Icons,
- * Meta-CustomData), die UUID der Wurzel (die kleinere) und versionMinor (das Maximum).
+ * liefern hier dasselbe): welche Einträge, Gruppen und Lösch-Vermerke das Ergebnis enthält,
+ * jedes Feld eines Eintrags samt Feld-Zeitstempeln, die Eigenschaften und die Elterngruppe
+ * jeder Gruppe und jedes Eintrags, die Meta-Angaben mit Zeitstempel (Datenbankname, Papierkorb,
+ * eigene Icons, Meta-CustomData), die UUID der Wurzel (die kleinere) und versionMinor (das
+ * Maximum). Der Verlauf nur bei gleichen Verlaufsgrenzen: Gekürzt wird nach denen von `local`.
  *
  * Von der Rolle der Seiten abhängig:
- *   - die Reihenfolge von Geschwistern (erst wie in `local`, dann die nur in `remote`);
+ *   - Reihenfolgen: die von Geschwistern (erst wie in `local`, dann die nur in `remote`) und die
+ *     von Listen und Maps ohne Bedeutung (Lösch-Vermerke, eigene Icons, Schlüssel in CustomData);
+ *     vaultsEquivalent (sync/vault-equal.ts) ignoriert sie;
  *   - von `local` übernommen: die KDBX-Einstellungen außer versionMinor (Verschlüsselung,
  *     Schlüsselableitung, Kompression, publicCustomData), die Verlaufsgrenzen
- *     (historyMaxItems, historyMaxSize), unbekannte Meta-Elemente (meta.unknown) und unbekannte
- *     Elemente unter <Root> (rootUnknown);
- *   - das Feld `winner` im Bericht.
+ *     (historyMaxItems, historyMaxSize) und damit die Kürzung des Verlaufs, unbekannte
+ *     Meta-Elemente (meta.unknown) und unbekannte Elemente unter <Root> (rootUnknown);
+ *   - das Feld `winner` im Bericht (und die Angaben „gegenüber local“, z. B. entriesUpdated).
  * syncVault setzt die von `local` übernommenen Angaben vorher auf die Werte des Servers
- * (adoptServerSettings in sync/sync.ts): Beim Abgleich gewinnt dort die Datei auf dem Server.
+ * (adoptServerSettings in sync/sync.ts; spec/README.md 5.7): Beim Abgleich gewinnt dort die
+ * Datei auf dem Server.
  */
 export type MergeVaults = (local: Vault, remote: Vault, options: MergeOptions) => MergeResult;
 

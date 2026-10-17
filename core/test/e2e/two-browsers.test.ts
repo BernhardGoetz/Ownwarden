@@ -88,7 +88,7 @@ describe.skipIf(!webDavTestServerAvailable() || !hasKeepassxc())("Ende-zu-Ende: 
 
   const adapter = (fetchFn?: typeof fetch) => new WebDavAdapter({ fileUrl, username: server.username, password: server.password, ...(fetchFn ? { fetch: fetchFn } : {}) });
 
-  it("Rennen mit 412: alle Änderungen beider Browser kommen an, KeePassXC sieht sie, Sicherungen aufgeräumt", async () => {
+  it("Rennen mit 412: alle Änderungen beider Browser kommen an, KeePassXC sieht sie, jede Fassung einmal gesichert", async () => {
     // Ausgangslage: Vivaldi legt die Datei an, Chrome lädt sie herunter.
     const initial = createNewVault({ name: "E2E", now: Date.now(), kdf: TEST_KDF });
     const clock = createVaultClock(initial);

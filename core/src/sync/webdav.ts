@@ -17,6 +17,10 @@
  *     der Server so lange nicht antwortet bzw. beim Lesen so lange keine Daten kommen. Für das
  *     Hochladen eines Inhalts kommt die Zeit hinzu, die er bei MIN_UPLOAD_BYTES_PER_SECOND
  *     braucht (siehe TransferDeadline) – große Tresore scheitern so nicht an langsamen Leitungen.
+ *     Achtung Service Worker: Chrome beendet ihn, wenn eine Antwort länger als 30 s braucht.
+ *     Das Zeitlimit gegen Stillstand bleibt darunter (DEFAULT_WEBDAV_TIMEOUT_MS), aber ein
+ *     großer Upload auf langsamer Leitung kann trotzdem länger dauern; dann bricht der Abgleich
+ *     ohne Meldung ab (Daten bleiben sicher, geschrieben wird nur bedingt).
  *
  * Sicherheit:
  *   - Nur https://, außer http:// auf den eigenen Rechner (Testserver), siehe parseStorageUrl.
@@ -85,7 +89,8 @@ export interface WebDavAdapterOptions {
   fetch?: typeof fetch;
   /**
    * Zeitlimit gegen Stillstand in ms (siehe Kopfkommentar); Standard DEFAULT_WEBDAV_TIMEOUT_MS.
-   * Im Service Worker der Erweiterung unter 30 000 bleiben.
+   * Im Service Worker der Erweiterung unter 30 000 bleiben. Uploads bekommen zusätzlich Zeit
+   * je nach Größe (MIN_UPLOAD_BYTES_PER_SECOND).
    */
   timeoutMs?: number;
   /** Uhr für die Zeit im Namen der Sicherungskopien (Tests); Standard Date.now. */
@@ -364,6 +369,16 @@ export class WebDavAdapter implements StorageAdapter {
       .at(-1);
     const others = [...children.keys()].filter((name) => name !== protectedName);
     const warnings: string[] = [];
+    // backup() hat diese Sicherung eben sichergestellt. Fehlt sie in der Liste, versteht das
+    // Aufräumen die Ordnerliste dieses Servers nicht (z. B. Dateien unter einem anderen Pfad)
+    // und löscht nie etwas – das soll nicht still bleiben (Review probe-2).
+    if (protectedName === undefined) {
+      warnings.push(
+        `Die Sicherung der eben überschriebenen Fassung fehlt in der Liste des Sicherungsordners ${describeUrl(this.backupFolderUrl)}. ` +
+          "Vermutlich nennt der Server die Dateien unter einem anderen Pfad; dann werden alte Sicherungskopien nie gelöscht. " +
+          "Bitte bei Gelegenheit im Sicherungsordner aufräumen (der WebDAV-Servertest prüft das).",
+      );
+    }
     for (const name of backupsToDelete(this.fileName, others, protectedName === undefined ? keep : keep - 1)) {
       const url = children.get(name)!.url;
       try {
@@ -450,8 +465,9 @@ export class WebDavAdapter implements StorageAdapter {
     allHeaders.set("Authorization", this.#authorization);
     // Text-Körper sind nur die kurzen PROPFIND-Anfragen (ASCII): Zeichen = Bytes.
     const bodyBytes = body === undefined ? 0 : typeof body === "string" ? body.length : body.byteLength;
+    const limitMs = this.timeoutMs + Math.ceil((bodyBytes * 1000) / MIN_UPLOAD_BYTES_PER_SECOND);
     const deadline = new TransferDeadline();
-    deadline.restart(this.timeoutMs + Math.ceil((bodyBytes * 1000) / MIN_UPLOAD_BYTES_PER_SECOND));
+    deadline.restart(limitMs);
     let response: Response;
     try {
       response = await this.fetchFn(url.href, {
@@ -466,7 +482,9 @@ export class WebDavAdapter implements StorageAdapter {
     } catch (error) {
       deadline.stop();
       const reason = deadline.expired
-        ? `Zeitüberschreitung: Der Server hat nicht rechtzeitig geantwortet bzw. die Übertragung kam nicht voran (Zeitlimit ${seconds(this.timeoutMs)} s ohne Fortschritt)`
+        ? typeof body !== "string" && bodyBytes > 0
+          ? `Zeitüberschreitung bei der Übertragung: Hochladen samt Antwort des Servers dauerte länger als ${seconds(limitMs)} s (Zeitlimit ${seconds(this.timeoutMs)} s plus Zeit für ${bodyBytes} Byte bei mindestens ${MIN_UPLOAD_BYTES_PER_SECOND / 1024} KiB/s)`
+          : `Zeitüberschreitung: Der Server hat nicht innerhalb von ${seconds(limitMs)} s geantwortet`
         : `keine Antwort vom Server (${fetchFailureReason(error, this.#secrets)})`;
       throw new StorageError(`${method} ${describeUrl(url)}: ${reason}.`);
     }

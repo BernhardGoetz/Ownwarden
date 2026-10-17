@@ -14,14 +14,21 @@
  * Ablauf: Unter der angegebenen Adresse entsteht ein neuer Ordner "ownwarden-probe-<zufall>/".
  * Alle Tests laufen nur darin; am Ende wird er wieder gelöscht – auch wenn etwas schiefgeht.
  *
+ * Grundsatz (Review probe-1, probe-2, probe-3): Jede Prüfung macht es so wie der echte Abgleich
+ * und ist mindestens so streng wie er – sonst wäre der Test grün, der Abgleich aber nicht sicher.
+ * Ließ sich etwas nicht prüfen (z. B. der Server antwortete vor dem Abbruch des Uploads), heißt
+ * das ⚠️ „nicht geprüft“, nie ✅. Die Sicherungskopien prüft der Test mit dem WebDavAdapter selbst.
+ *
  * Aufbau: runWebDavProbe() ist die eigentliche Prüfung (auch aus Tests aufrufbar, siehe
  * webdav-probe.test.ts); main() ist nur die Kommandozeile drumherum.
  */
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { createInterface } from "node:readline";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import type { RemoteFile } from "../contracts";
 import { DEFAULT_SYNC_SETTINGS } from "../sync/sync";
+import { BACKUP_FOLDER_NAME, DEFAULT_WEBDAV_TIMEOUT_MS, WebDavAdapter } from "../sync/webdav";
 import {
   basicAuthorization,
   bytesBody,
@@ -34,6 +41,8 @@ import {
   parseStorageUrl,
 } from "../sync/http";
 import { parseMultistatus } from "../sync/multistatus";
+import { isMainModule } from "./main-module";
+import { inputLikelyVisible, VISIBLE_INPUT_WARNING } from "./prompt";
 
 /**
  * Hinweis für PROPFIND/DELETE-Probleme: Sie betreffen nur das Aufräumen alter Sicherungen,
@@ -41,6 +50,16 @@ import { parseMultistatus } from "../sync/multistatus";
  */
 const PRUNING_ONLY =
   "Der Abgleich funktioniert trotzdem; alte Sicherungskopien werden dann aber nicht automatisch gelöscht (bitte gelegentlich von Hand aufräumen).";
+
+/**
+ * Abgebrochener Upload (--abort-test): So viele Bytes kündigt Content-Length an, so viele werden
+ * wirklich gesendet, bevor die Verbindung getrennt wird.
+ */
+const ABORT_UPLOAD_BYTES = 512 * 1024;
+const ABORT_SENT_BYTES = 256 * 1024;
+
+/** So oft versucht die Prüfung „derselben Sekunde“, beide Schreibvorgänge in eine Serversekunde zu bekommen. */
+const SAME_SECOND_ATTEMPTS = 5;
 
 // ---------------------------------------------------------------------------
 // Ergebnis-Typen
@@ -76,7 +95,7 @@ export interface ProbeOptions {
   abortTest?: boolean;
   /** Erlaubte Abweichung der Geräteuhr; Standard wie beim Abgleich. */
   maxClockSkewMs?: number;
-  /** Zeitlimit pro Anfrage; Standard 60 s. */
+  /** Zeitlimit pro Anfrage; Standard wie beim Abgleich (DEFAULT_WEBDAV_TIMEOUT_MS, 25 s). */
   timeoutMs?: number;
   /** Eigene fetch-Funktion (Tests). */
   fetch?: typeof fetch;
@@ -99,6 +118,15 @@ interface ProbeResponse {
 
 /** Netzwerkfehler (keine HTTP-Antwort). */
 class NoResponseError extends Error {}
+
+/** Ausgang des abgebrochenen Uploads (ProbeSession.abortedUpload). */
+type AbortOutcome =
+  /** Ein Teil wurde gesendet, dann die Verbindung getrennt – so soll es sein. */
+  | { kind: "aborted" }
+  /** Der Server hat schon VOR dem Abbruch geantwortet. */
+  | { kind: "answered"; status: number }
+  /** Die Verbindung scheiterte vor dem Abbruch. */
+  | { kind: "failed"; reason: string };
 
 /** Abbruch der restlichen Prüfungen (z. B. Anmeldung abgelehnt). */
 class StopProbe extends Error {}
@@ -150,33 +178,64 @@ class ProbeSession {
     return fetchFailureReason(error, this.secrets);
   }
 
-  /** Läuft ein Upload, der mittendrin abgebrochen wird: erst ein Teil, dann Abbruch. */
-  async abortedUpload(url: URL, ifMatch: string): Promise<string> {
-    const controller = new AbortController();
-    const chunk = new Uint8Array(256 * 1024).fill(0x58);
-    const body = new ReadableStream<Uint8Array>({
-      start(stream) {
-        stream.enqueue(chunk); // erster Teil; der Rest kommt nie
-      },
+  /** WebDavAdapter mit denselben Zugangsdaten, demselben fetch und demselben Zeitlimit wie die Prüfung. */
+  adapter(fileUrl: URL): WebDavAdapter {
+    return new WebDavAdapter({
+      fileUrl: fileUrl.href,
+      username: this.options.username,
+      password: this.options.password,
+      fetch: this.fetchFn,
+      timeoutMs: this.timeoutMs,
     });
-    const upload = this.fetchFn(url.href, {
-      method: "PUT",
-      body,
-      headers: { Authorization: this.authorization, "If-Match": ifMatch, "Content-Type": "application/octet-stream" },
-      signal: controller.signal,
-      credentials: "omit",
-      redirect: "manual",
-      duplex: "half", // für Stream-Körper in Node nötig
-    } as RequestInit);
-    await sleep(1000);
-    controller.abort();
-    try {
-      const response = await upload;
-      await response.body?.cancel();
-      return `Server hat schon vor dem Abbruch geantwortet (HTTP ${response.status})`;
-    } catch {
-      return "Upload nach 256 KiB abgebrochen";
-    }
+  }
+
+  /**
+   * Ein Upload wie beim echten Abgleich, der mittendrin abbricht (Review probe-1/xc-2):
+   * WebDavAdapter.write schickt immer eine Content-Length. Genau so hier – angekündigt werden
+   * ABORT_UPLOAD_BYTES, gesendet nur ABORT_SENT_BYTES, dann wird die Verbindung getrennt.
+   *
+   * Absichtlich mit node:http(s) statt fetch: fetch schickt einen Körper, der erst nach und nach
+   * entsteht, nur „chunked“ OHNE Content-Length. Das ist im Server ein anderer Weg (Nextcloud
+   * erkennt einen unvollständigen Upload nur am Vergleich mit Content-Length), und manche Server
+   * oder Vorschaltrechner lehnen ihn sofort ab (z. B. 411) – dann käme gar kein abgebrochener
+   * Upload beim Server an.
+   */
+  abortedUpload(url: URL, ifMatch: string): Promise<AbortOutcome> {
+    const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+    return new Promise((resolvePromise) => {
+      let settled = false;
+      let pause: ReturnType<typeof setTimeout> | undefined;
+      const finish = (outcome: AbortOutcome) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(pause);
+        clearTimeout(deadline);
+        request.destroy(); // trennt die Verbindung; der Rest des Körpers kommt nie
+        resolvePromise(outcome);
+      };
+      const request = send(url, {
+        method: "PUT",
+        headers: {
+          Authorization: this.authorization,
+          "If-Match": ifMatch,
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(ABORT_UPLOAD_BYTES),
+        },
+      });
+      const deadline = setTimeout(
+        () => finish({ kind: "failed", reason: `der erste Teil ging nicht innerhalb von ${Math.round(this.timeoutMs / 1000)} s hinaus` }),
+        this.timeoutMs,
+      );
+      request.on("response", (response) => {
+        response.resume();
+        finish({ kind: "answered", status: response.statusCode ?? 0 });
+      });
+      request.on("error", (error) => finish({ kind: "failed", reason: this.scrub(error) }));
+      // Erst den Teil senden; ist er hinaus, dem Server eine Sekunde geben, ihn zu empfangen.
+      request.write(new Uint8Array(ABORT_SENT_BYTES).fill(0x58), (error) => {
+        if (error == null) pause = setTimeout(() => finish({ kind: "aborted" }), 1000);
+      });
+    });
   }
 }
 
@@ -194,7 +253,7 @@ export async function runWebDavProbe(options: ProbeOptions): Promise<ProbeReport
   const base = parseStorageUrl(options.folderUrl, "Ordner-Adresse");
   if (!base.pathname.endsWith("/")) base.pathname += "/";
   const folder = new URL(`ownwarden-probe-${randomHex(4)}/`, base);
-  const session = new ProbeSession(options, options.timeoutMs ?? 60_000);
+  const session = new ProbeSession(options, options.timeoutMs ?? DEFAULT_WEBDAV_TIMEOUT_MS);
   const maxSkew = options.maxClockSkewMs ?? DEFAULT_SYNC_SETTINGS.maxClockSkewMs;
   const checks: ProbeCheck[] = [];
   const report = (check: ProbeCheck) => {
@@ -260,12 +319,14 @@ interface ProbeState {
   staleEtag: string;
   /** Der Server nennt den ETag nur per PROPFIND, nicht im GET. */
   etagOnlyViaPropfind: boolean;
+  /** Die PUT-Antwort nennt denselben ETag wie das GET danach (dann spart „same-second“ ein GET). */
+  putEtagMatchesGet: boolean;
 }
 
 /** Die Prüfschritte in ihrer Reihenfolge. */
 function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTest: boolean): { steps: Step[]; state: ProbeState } {
   const file = new URL("probe.kdbx", folder);
-  const state: ProbeState = { folderMayExist: false, content: new Uint8Array(), etag: "", staleEtag: "", etagOnlyViaPropfind: false };
+  const state: ProbeState = { folderMayExist: false, content: new Uint8Array(), etag: "", staleEtag: "", etagOnlyViaPropfind: false, putEtagMatchesGet: false };
   const sameLength = (tag: string) => text(`Ownwarden-Probe-${tag}-${randomHex(8)}`);
 
   /** GET der Testdatei; liefert Inhalt und ETag (ggf. per PROPFIND). */
@@ -362,27 +423,59 @@ function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTe
         state.staleEtag = state.etag;
         state.etag = after.etag;
         state.content = next;
+        state.putEtagMatchesGet = putEtag !== null && putEtag === after.etag;
         const putNote = putEtag === null ? "PUT-Antwort ohne ETag" : putEtag === after.etag ? "PUT-Antwort nennt denselben ETag" : `PUT-Antwort nennt ${putEtag}, GET aber ${after.etag}`;
         return ["ok", `HTTP ${response.status}; neuer ETag ${after.etag} (${putNote})`];
       },
     },
     {
+      // Review probe-3/xc-9: Bilden Server den ETag nur aus Größe + Änderungszeit in ganzen
+      // Sekunden, bekäme ein zweites Gerät, das in derselben Sekunde gleich viel schreibt,
+      // keine 412. Geprüft werden deshalb ZWEI Schreibvorgänge mit gleich großem Inhalt, die
+      // nachweislich in derselben Serversekunde lagen: Das erste Schreiben beginnt nach dem
+      // Date-Header des GET davor, das zweite endet vor dem Date-Header seiner eigenen Antwort.
+      // Nennen beide Header dieselbe Sekunde, lagen beide Schreibvorgänge in ihr. Sonst neuer
+      // Versuch; klappt es nie (langsame Leitung), heißt das ⚠️ „nicht geprüft“, nicht ✅.
       id: "same-second",
       title: "Neuer ETag auch bei gleich großem Inhalt in derselben Sekunde",
       blocking: false,
       run: async () => {
-        const next = sameLength("D");
-        const started = Date.now();
-        const response = expectHttp(await session.request("PUT", file, putHeaders({ "If-Match": state.etag }), next), "PUT");
-        if (response.status < 200 || response.status >= 300) return ["fail", `HTTP ${response.status} – erwartet 2xx`];
-        const after = await readFile();
-        const sameSecond = Math.floor(started / 1000) === Math.floor(after.response.receivedAt / 1000) ? "in derselben Sekunde" : "knapp eine Sekunde später";
-        if (after.etag === null || after.etag === state.etag) {
-          return ["fail", `Der ETag blieb gleich (${after.etag ?? "keiner"}). Zwei schnelle Änderungen wären nicht unterscheidbar – eine könnte unbemerkt verloren gehen.`];
+        for (let attempt = 1; attempt <= SAME_SECOND_ATTEMPTS; attempt++) {
+          const before = await readFile();
+          if (before.etag === null) return ["fail", "Der Server nennt keinen ETag mehr."];
+          const first = sameLength("D");
+          const firstResponse = expectHttp(await session.request("PUT", file, putHeaders({ "If-Match": before.etag }), first), "PUT");
+          if (firstResponse.status < 200 || firstResponse.status >= 300) return ["fail", `HTTP ${firstResponse.status} – erwartet 2xx`];
+          state.content = first;
+          const firstEtag = (state.putEtagMatchesGet ? putResponseEtag(firstResponse) : null) ?? (await readFile()).etag;
+          if (firstEtag === null) return ["fail", "Nach dem Schreiben nennt der Server keinen ETag."];
+          state.etag = firstEtag;
+
+          const second = sameLength("D");
+          const secondResponse = expectHttp(await session.request("PUT", file, putHeaders({ "If-Match": firstEtag }), second), "PUT");
+          if (secondResponse.status < 200 || secondResponse.status >= 300) {
+            return ["fail", `HTTP ${secondResponse.status} beim zweiten Schreiben – erwartet 2xx (If-Match mit dem ETag nach dem ersten)`];
+          }
+          state.content = second;
+          const after = await readFile();
+          if (!sameBytes(after.data, second)) return ["fail", "Nach dem Schreiben liefert GET nicht den neuen Inhalt."];
+          if (after.etag === null || after.etag === firstEtag) {
+            return ["fail", `Der ETag blieb gleich (${after.etag ?? "keiner"}). Zwei schnelle Änderungen wären nicht unterscheidbar – eine könnte unbemerkt verloren gehen.`];
+          }
+          state.etag = after.etag;
+
+          const start = serverSecond(before.response);
+          const end = serverSecond(secondResponse);
+          if (start === undefined || end === undefined) {
+            return ["warn", "nicht geprüft: Ohne Date-Header lässt sich nicht feststellen, ob beide Schreibvorgänge in derselben Sekunde lagen. Der ETag hat sich geändert."];
+          }
+          if (start === end) return ["ok", `ETag geändert; beide Schreibvorgänge lagen in derselben Serversekunde${attempt > 1 ? ` (${attempt}. Versuch)` : ""}`];
         }
-        state.etag = after.etag;
-        state.content = next;
-        return ["ok", `ETag geändert (${sameSecond} geschrieben)`];
+        return [
+          "warn",
+          `nicht geprüft: In ${SAME_SECOND_ATTEMPTS} Versuchen lagen die beiden Schreibvorgänge nie in derselben Serversekunde (Antworten zu langsam). ` +
+            "Der ETag hat sich jedes Mal geändert; ob er das auch bei zwei Änderungen in derselben Sekunde tut, bleibt offen.",
+        ];
       },
     },
     {
@@ -442,8 +535,18 @@ function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTe
         // Eigentümers): Ohne PROPFIND bleiben nur alte Sicherungen liegen – daher Hinweis, kein Fehler.
         if (response.status !== 207) return ["warn", `HTTP ${response.status} – erwartet 207. ${PRUNING_ONLY}`];
         const resources = parseMultistatus(text(response.data));
-        const entry = resources.find((resource) => decodeURIComponent(resource.href.replace(/\/$/, "").split("/").pop() ?? "") === "probe.kdbx");
-        if (entry === undefined) return ["warn", `Die Testdatei fehlt in der Ordnerliste. ${PRUNING_ONLY}`];
+        // So streng wie beim Aufräumen (WebDavAdapter.pruneBackups, Review probe-2): Dort zählt
+        // nur, was DIREKT im angefragten Ordner liegt. Nennt der Server die Datei unter einem
+        // anderen Pfad (umgeschriebene Adresse, anderer DAV-Zugang), fände Ownwarden alte
+        // Sicherungen nie – ohne jeden Hinweis.
+        const entry = resources.find((resource) => isDirectChild(resource.href, folder, "probe.kdbx"));
+        if (entry === undefined) {
+          const elsewhere = resources.find((resource) => decodeSegment(resource.href.replace(/\/$/, "").split("/").pop() ?? "") === "probe.kdbx");
+          if (elsewhere !== undefined) {
+            return ["warn", `Die Ordnerliste nennt die Testdatei unter einem anderen Pfad (${elsewhere.href}) als den angefragten Ordner (${folder.pathname}). ${PRUNING_ONLY}`];
+          }
+          return ["warn", `Die Testdatei fehlt in der Ordnerliste. ${PRUNING_ONLY}`];
+        }
         const etag = entry.props.get("getetag");
         const note = etag === state.etag ? "getetag stimmt mit dem ETag überein" : `getetag ${etag ?? "fehlt"} weicht vom ETag ${state.etag} ab`;
         return [etag === state.etag ? "ok" : "warn", `${resources.length} Einträge; ${note}`];
@@ -483,16 +586,73 @@ function probeSteps(session: ProbeSession, folder: URL, maxSkew: number, abortTe
       },
     },
     {
+      // Review probe-2: genau der Code des Abgleichs (WebDavAdapter) – MKCOL auf den schon
+      // vorhandenen Sicherungsordner (das passiert bei JEDEM Abgleich und muss 201, 405 oder
+      // eine Weiterleitung liefern, sonst scheitert jedes Schreiben), COPY in den Unterordner und
+      // das Aufräumen. Ob das Aufräumen wirklich gelöscht hat, prüft danach eine eigene Liste.
+      id: "backups",
+      title: "Sicherungskopien wie beim Abgleich (Ordner, Kopie, Aufräumen)",
+      blocking: false,
+      run: async () => {
+        const adapter = session.adapter(file);
+        const backupFolder = new URL(`${BACKUP_FOLDER_NAME}/`, folder);
+        let kept: RemoteFile;
+        let pruneWarnings: string[];
+        try {
+          const first = await adapter.read();
+          if (first === null) return ["fail", "Die Testdatei fehlt."];
+          await adapter.backup(first); // legt den Sicherungsordner an
+          await adapter.write(sameLength("H"), { ifMatch: first.etag });
+          const second = await adapter.read();
+          if (second === null) return ["fail", "Die Testdatei fehlt nach dem Schreiben."];
+          state.content = second.data;
+          state.etag = second.etag;
+          await adapter.backup(second); // Sicherungsordner gibt es jetzt schon
+          pruneWarnings = (await adapter.pruneBackups(second, 1)).warnings;
+          kept = second;
+        } catch (error) {
+          // Für die folgenden Schritte festhalten, was jetzt in der Testdatei steht.
+          const current = await readFile().catch(() => null);
+          if (current !== null && current.etag !== null) {
+            state.content = current.data;
+            state.etag = current.etag;
+          }
+          return ["fail", `${session.scrub(error)} Ohne Sicherungskopie schreibt Ownwarden nie – mit diesem Server scheiterte jeder Abgleich, der etwas ändert.`];
+        }
+        const remaining = await listFiles(session, backupFolder);
+        const leftOver = remaining !== null && remaining.length !== 1 ? `Nach dem Aufräumen liegen ${remaining.length} statt 1 Sicherung im Ordner. ` : "";
+        if (pruneWarnings.length > 0) return ["warn", `${leftOver}${pruneWarnings.join(" ")} ${PRUNING_ONLY}`];
+        if (remaining === null) return ["warn", `Der Sicherungsordner ließ sich nicht auflisten. ${PRUNING_ONLY}`];
+        if (remaining.length !== 1) {
+          return ["warn", `Nach dem Aufräumen liegen ${remaining.length} statt 1 Sicherung im Ordner – das Aufräumen versteht die Ordnerliste dieses Servers nicht und löscht nie etwas, ohne Hinweis. ${PRUNING_ONLY}`];
+        }
+        const copy = expectHttp(await session.request("GET", new URL(encodeURIComponent(remaining[0]!), backupFolder)), "GET");
+        if (copy.status !== 200 || !sameBytes(copy.data, kept.data)) return ["fail", "Die übrige Sicherungskopie hat nicht den Inhalt der gesicherten Fassung."];
+        return ["ok", "Sicherungsordner angelegt und wiederverwendet, zwei Fassungen gesichert, die ältere Sicherung aufgeräumt"];
+      },
+    },
+    {
       id: "abort",
       title: "Abgebrochener Upload lässt die alte Fassung unverändert",
       blocking: false,
       run: async () => {
         if (!abortTest) return ["skip", "nicht ausgeführt (mit --abort-test einschalten)"];
-        const how = await session.abortedUpload(file, state.etag);
+        const outcome = await session.abortedUpload(file, state.etag);
         await sleep(1500); // dem Server Zeit geben, den halben Upload zu verwerfen
         const after = await readFile();
-        if (sameBytes(after.data, state.content) && after.etag === state.etag) return ["ok", `${how}; Inhalt und ETag unverändert`];
-        return ["fail", `${how}; danach hat die Datei einen anderen Inhalt oder ETag – ein abgebrochener Upload kann die Tresor-Datei beschädigen!`];
+        const unchanged = sameBytes(after.data, state.content) && after.etag === state.etag;
+        const partial = `${ABORT_SENT_BYTES / 1024} von angekündigten ${ABORT_UPLOAD_BYTES / 1024} KiB`;
+        const damaged = "ein abgebrochener Upload kann die Tresor-Datei beschädigen!";
+        if (outcome.kind === "answered" && outcome.status >= 200 && outcome.status < 300) {
+          return ["fail", `Der Server hat den unvollständigen Upload (${partial}) mit HTTP ${outcome.status} angenommen – ${damaged}`];
+        }
+        if (!unchanged) return ["fail", `Upload nach ${partial} abgebrochen; danach hat die Datei einen anderen Inhalt oder ETag – ${damaged}`];
+        if (outcome.kind === "aborted") return ["ok", `Upload nach ${partial} abgebrochen; Inhalt und ETag unverändert`];
+        // Kam der abgebrochene Upload gar nicht beim Server an, ist nichts geprüft (Review probe-1/xc-2).
+        if (outcome.kind === "answered") {
+          return ["warn", `nicht geprüft: Der Server antwortete schon vor dem Abbruch (HTTP ${outcome.status}); ein abgebrochener Upload kam also nie bei ihm an. Inhalt und ETag sind unverändert.`];
+        }
+        return ["warn", `nicht geprüft: Die Verbindung scheiterte schon vor dem Abbruch (${outcome.reason}). Inhalt und ETag sind unverändert.`];
       },
     },
   ];
@@ -534,6 +694,55 @@ async function propfindEtag(session: ProbeSession, file: URL): Promise<string | 
   if (response.status !== 207) return null;
   const etag = parseMultistatus(text(response.data))[0]?.props.get("getetag");
   return etag === undefined || etag === "" ? null : etag;
+}
+
+/** Namen der Dateien (ohne Ordner) direkt in `folderUrl` per PROPFIND (Depth 1); null, wenn keine Liste kommt. */
+async function listFiles(session: ProbeSession, folderUrl: URL): Promise<string[] | null> {
+  const response = expectHttp(await session.request("PROPFIND", folderUrl, { Depth: "1", "Content-Type": "application/xml; charset=utf-8" }, PROPFIND_BODY), "PROPFIND");
+  if (response.status !== 207) return null;
+  return parseMultistatus(text(response.data))
+    .filter((resource) => !resource.isCollection)
+    .map((resource) => decodeSegment(resource.href.split("/").pop() ?? ""))
+    .filter((name) => name !== "");
+}
+
+/**
+ * true, wenn `href` (aus einer PROPFIND-Antwort) die Datei `name` DIREKT in `folderUrl` ist – mit
+ * derselben Regel wie WebDavAdapter beim Aufräumen: Pfad abschnittsweise dekodiert verglichen,
+ * vom href zählt nur der Pfad.
+ */
+function isDirectChild(href: string, folderUrl: URL, name: string): boolean {
+  let path: string;
+  try {
+    path = new URL(href, folderUrl).pathname;
+  } catch {
+    return false;
+  }
+  const slash = path.lastIndexOf("/");
+  return decodePath(path.slice(0, slash + 1)) === decodePath(folderUrl.pathname) && decodeSegment(path.slice(slash + 1)) === name;
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+function decodePath(path: string): string {
+  return path.split("/").map(decodeSegment).join("/");
+}
+
+/** ETag aus einer PUT-Antwort (Nextcloud: "ETag" und "OC-ETag"). */
+function putResponseEtag(response: ProbeResponse): string | null {
+  return headerValue(response.headers, "ETag") ?? headerValue(response.headers, "OC-ETag");
+}
+
+/** Sekunde (Serverzeit) aus dem Date-Header einer Antwort. */
+function serverSecond(response: ProbeResponse): number | undefined {
+  const date = parseHttpDate(response.headers.get("Date"));
+  return date === undefined ? undefined : Math.floor(date / 1000);
 }
 
 function putHeaders(extra: Record<string, string>): Record<string, string> {
@@ -684,11 +893,13 @@ export async function main(argv: string[]): Promise<number> {
 
 /**
  * Fragt das Passwort ab, ohne es anzuzeigen. Kommt die Eingabe nicht von einem Terminal
- * (z. B. über eine Pipe), wird die erste Zeile gelesen.
+ * (z. B. über eine Pipe), wird die erste Zeile gelesen; die Frage erscheint trotzdem, in Git Bash
+ * ohne Terminal mit einer Warnung, dass die Eingabe sichtbar ist (prompt.ts, Review cli-1).
  */
 async function promptHidden(question: string): Promise<string> {
   const stdin = process.stdin;
   if (!stdin.isTTY) {
+    process.stderr.write(inputLikelyVisible(stdin.isTTY) ? `${VISIBLE_INPUT_WARNING}\n${question}` : question);
     const lines = createInterface({ input: stdin });
     for await (const line of lines) {
       lines.close();
@@ -725,13 +936,9 @@ async function promptHidden(question: string): Promise<string> {
   });
 }
 
-/** true, wenn diese Datei direkt gestartet wurde (nicht importiert, z. B. aus einem Test). */
-function isMainModule(): boolean {
-  const script = process.argv[1];
-  return script !== undefined && import.meta.url === pathToFileURL(resolve(script)).href;
-}
-
-if (isMainModule()) {
+// Nur, wenn diese Datei direkt gestartet wurde (nicht importiert, z. B. aus einem Test); auch
+// über einen Symlink (main-module.ts) – sonst endete der Test ohne Ausgabe mit Exit 0 = „sicher“.
+if (isMainModule(import.meta.url)) {
   main(process.argv.slice(2)).then(
     (code) => {
       process.exitCode = code;

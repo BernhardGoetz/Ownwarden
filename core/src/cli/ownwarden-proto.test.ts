@@ -4,8 +4,9 @@
  */
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CORE_DIR, createTmpDir, removeTmpDir } from "../../test/helpers/keepassxc";
 import { TEST_KDF } from "../../test/helpers/kdbx-files";
@@ -14,7 +15,9 @@ import { readKdbx } from "../kdbx/index";
 import { findEntry } from "../merge/tree";
 import type { Vault } from "../model";
 import { writeFileAtomic } from "./atomic-file";
-import { ENV, runCli, type CliIo } from "./ownwarden-proto";
+import { LOCAL_BACKUP_FOLDER } from "./local-backups";
+import { isMainModule } from "./main-module";
+import { ENV, runCli, USAGE, type CliIo } from "./ownwarden-proto";
 
 const MASTER = "Proto-Master-äöü-7f3";
 const ENTRY_PASSWORD = "Eintrag-Geheim-91x";
@@ -222,6 +225,24 @@ describe("Kommandozeile des Prototyps", () => {
     expect(extra.fake.questions).toEqual([]);
   });
 
+  it("Hilfe nennt repair-times, die lokalen Sicherungen und --merge-different-vault", () => {
+    expect(USAGE).toContain("repair-times <datei>");
+    expect(USAGE).toContain(`${LOCAL_BACKUP_FOLDER}/`);
+    expect(USAGE).toContain("--merge-different-vault");
+  });
+
+  it("repair-times ohne Zeitstempel aus der Zukunft ändert nichts", async () => {
+    const path = file("ohne-zukunft.kdbx");
+    await cli(["init", path]);
+    await cli(["add", path, "--title", "Mail"]);
+    const before = readFileSync(path);
+    const run = await cli(["repair-times", path]);
+    expect(run.code).toBe(0);
+    expect(run.fake.out[0]).toMatch(/^Keine Zeitstempel aus der Zukunft gefunden/);
+    expect(readFileSync(path).equals(before)).toBe(true);
+    expect(existsSync(file(LOCAL_BACKUP_FOLDER))).toBe(false);
+  });
+
   it("sync lehnt Zugangsdaten in der Adresse ab, bevor etwas abgefragt oder ausgegeben wird", async () => {
     const run = await cli(["sync", file("x.kdbx"), "--url", "https://alice:pw-in-url-123@cloud.example/t.kdbx", "--user", "alice"], fakeIo({}, [MASTER, "x"]));
     expect(run.code).toBe(2);
@@ -305,6 +326,106 @@ describe.skipIf(!webDavTestServerAvailable())("Kommandozeile: sync gegen den Sab
     }
   });
 
+  it("sync sichert die bisherige lokale Datei, bevor er sie inhaltlich ersetzt, und nennt anderswo gelöschte Einträge (Review sync-1)", async () => {
+    const url = new URL("Ownwarden/sicherung.kdbx", server.baseUrl).href;
+    const env = { [ENV.master]: MASTER, [ENV.webdav]: server.password };
+    const sync = (path: string) => cli(["sync", path, "--url", url, "--user", server.username], fakeIo(env));
+    const dirA = join(dir, "sicherung-a");
+    const dirB = join(dir, "sicherung-b");
+    mkdirSync(dirA);
+    mkdirSync(dirB);
+    const fileA = join(dirA, "a.kdbx");
+    const fileB = join(dirB, "b.kdbx");
+    const backupsA = () => (existsSync(join(dirA, LOCAL_BACKUP_FOLDER)) ? readdirSync(join(dirA, LOCAL_BACKUP_FOLDER)) : []);
+
+    await cli(["init", fileA]);
+    await cli(["add", fileA, "--title", "Mail"]);
+    await cli(["add", fileA, "--title", "Alt"]);
+    expect((await sync(fileA)).code).toBe(0); // legt an: lokale Datei inhaltlich unverändert -> keine Sicherung
+    expect(backupsA()).toEqual([]);
+    expect((await sync(fileB)).code).toBe(0); // B holt die Server-Fassung
+    await cli(["rm", fileB, "Alt"]);
+    await cli(["rm", fileB, "Papierkorb/Alt"]); // endgültig
+    expect((await sync(fileB)).code).toBe(0);
+
+    const before = readFileSync(fileA);
+    const run = await sync(fileA);
+    expect(run.code).toBe(0);
+    expect(backupsA()).toHaveLength(1);
+    const backupPath = join(dirA, LOCAL_BACKUP_FOLDER, backupsA()[0]!);
+    expect(readFileSync(backupPath).equals(before)).toBe(true); // die bisherige Datei, Byte für Byte
+    expect(titles(await open(backupPath)).sort()).toEqual(["Alt", "Mail"]);
+    expect(titles(await open(fileA))).toEqual(["Mail"]);
+    expect(run.fake.out).toContain(`Bisherige lokale Fassung gesichert: ${backupPath}`);
+    expect(run.fake.out.join("\n")).toMatch(/⚠️ {2}Auf einem anderen Gerät gelöscht und deshalb hier entfernt: „Alt“/);
+    expect(run.fake.out.at(-1)).toBe("Lokale Datei aktualisiert.");
+
+    // Nichts Neues: keine weitere Sicherung (sonst verdrängten leere Abgleiche die nützlichen).
+    expect((await sync(fileA)).fake.out).not.toContain(expect.stringMatching(/gesichert/));
+    expect(backupsA()).toHaveLength(1);
+  });
+
+  it("zwei unabhängig mit init angelegte Datenbanken werden nicht still zusammengeführt; --merge-different-vault erlaubt es (Review xc-6)", async () => {
+    const url = new URL("Ownwarden/eine-datenbank.kdbx", server.baseUrl).href;
+    const env = { [ENV.master]: MASTER, [ENV.webdav]: server.password };
+    const first = join(dir, "erste.kdbx");
+    const second = join(dir, "zweite.kdbx");
+    await cli(["init", first]);
+    await cli(["add", first, "--title", "Erste"]);
+    expect((await cli(["sync", first, "--url", url, "--user", server.username], fakeIo(env))).code).toBe(0);
+    await cli(["init", second]); // statt „sync ohne lokale Datei“
+    await cli(["add", second, "--title", "Zweite"]);
+    const serverFile = join(server.dataDir, "Ownwarden", "eine-datenbank.kdbx");
+    const serverBefore = readFileSync(serverFile);
+    const localBefore = readFileSync(second);
+
+    const refused = await cli(["sync", second, "--url", url, "--user", server.username], fakeIo(env));
+    expect(refused.code).toBe(1);
+    expect(refused.fake.err.join("\n")).toContain("verschiedene Datenbanken");
+    expect(refused.fake.err.join("\n")).toContain("--merge-different-vault");
+    expect(readFileSync(serverFile).equals(serverBefore)).toBe(true);
+    expect(readFileSync(second).equals(localBefore)).toBe(true);
+    const serverBackups = join(server.dataDir, "Ownwarden", "ownwarden-backups");
+    const backupsOfThisFile = existsSync(serverBackups) ? readdirSync(serverBackups).filter((name) => name.startsWith("eine-datenbank.")) : [];
+    expect(backupsOfThisFile).toEqual([]); // auch keine Sicherung
+
+    const merged = await cli(["sync", second, "--url", url, "--user", server.username, "--merge-different-vault"], fakeIo(env));
+    expect(merged.code).toBe(0);
+    expect(titles(await open(second)).sort()).toEqual(["Erste", "Zweite"]);
+  });
+
+  it("Zeitstempel aus der Zukunft: sync verweigert mit Hinweis auf repair-times; nach der Reparatur gleicht er ab", async () => {
+    const url = new URL("Ownwarden/uhr.kdbx", server.baseUrl).href;
+    const env = { [ENV.master]: MASTER, [ENV.webdav]: server.password };
+    const path = join(dir, "uhr.kdbx");
+    await cli(["init", path]);
+    await cli(["add", path, "--title", "Mail"]);
+    expect((await cli(["sync", path, "--url", url, "--user", server.username], fakeIo(env))).code).toBe(0);
+    const serverFile = join(server.dataDir, "Ownwarden", "uhr.kdbx");
+    const serverBefore = readFileSync(serverFile);
+
+    // Offline bearbeitet, während die Uhr einen Tag vorging; danach wurde sie gestellt.
+    const wrongClock = fakeIo();
+    wrongClock.io.now = () => Date.now() + 86_400_000;
+    expect((await cli(["set", path, "Mail", "UserName", "falsche-uhr"], wrongClock)).code).toBe(0);
+    const refused = await cli(["sync", path, "--url", url, "--user", server.username], fakeIo(env));
+    expect(refused.code).toBe(1);
+    expect(refused.fake.err.join("\n")).toContain("Zeitstempel aus der Zukunft");
+    expect(refused.fake.err.join("\n")).toContain(`npm run proto -- repair-times ${path}`);
+    expect(readFileSync(serverFile).equals(serverBefore)).toBe(true);
+
+    const repair = await cli(["repair-times", path]);
+    expect(repair.code).toBe(0);
+    expect(repair.fake.out[0]).toMatch(/^\d+ Zeitstempel aus der Zukunft auf jetzt/);
+    expect(repair.fake.out.join("\n")).toContain(`Bisherige Fassung gesichert: ${join(dir, LOCAL_BACKUP_FOLDER)}`);
+    expect((await cli(["repair-times", path])).fake.out[0]).toMatch(/^Keine Zeitstempel aus der Zukunft gefunden/);
+
+    const synced = await cli(["sync", path, "--url", url, "--user", server.username], fakeIo(env));
+    expect(synced.code).toBe(0);
+    expect(synced.fake.out).toContain("Zusammengeführt und hochgeladen.");
+    expect((await open(serverFile)).root.entries[0]!.strings.get("UserName")?.value).toBe("falsche-uhr");
+  });
+
   it("falsches WebDAV-Passwort: Meldung ohne Passwort, lokale Datei unverändert", async () => {
     const url = new URL("Ownwarden/tresor.kdbx", server.baseUrl).href;
     const path = join(dir, "falsches-webdav.kdbx");
@@ -361,5 +482,42 @@ describe("Kommandozeile als echtes Programm (npm run proto / tsx)", () => {
     const show = await run(tsx, ["src/cli/ownwarden-proto.ts", "show", path, "Pipe", "--reveal"], "", { [ENV.master]: MASTER });
     expect(show.code).toBe(0);
     expect(show.stdout).toContain(`Passwort: ${ENTRY_PASSWORD}`);
+    // Auch über eine Pipe sieht ein Mensch, worauf das Programm wartet (Review cli-1).
+    expect(add.stderr).toContain("Passwort für den neuen Eintrag: ");
+  });
+
+  it("beide Programme starten auch über einen Symlink – sonst endeten sie ohne Ausgabe mit Exit 0 (Review xc-5)", async () => {
+    const link = join(dir, "core-link");
+    symlinkSync(CORE_DIR, link, process.platform === "win32" ? "junction" : "dir");
+    const tsx = join(CORE_DIR, "node_modules", ".bin", "tsx");
+    const proto = await run(tsx, [join(link, "src", "cli", "ownwarden-proto.ts"), "--help"], "");
+    expect(proto.code).toBe(0);
+    expect(proto.stdout).toContain("NUR FÜR TESTDATEN");
+    const probe = await run(tsx, [join(link, "src", "cli", "webdav-probe.ts"), "--help"], "");
+    expect(probe.code).toBe(0);
+    expect(probe.stdout).toContain("Aufruf:");
+  });
+});
+
+describe("isMainModule (Review xc-5)", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = createTmpDir("main-module");
+  });
+  afterAll(() => {
+    if (dir) removeTmpDir(dir);
+  });
+
+  it("vergleicht echte Pfade: direkt und über einen Symlink true, andere Datei oder kein Skript false", () => {
+    const script = join(dir, "programm.ts");
+    writeFileSync(script, "");
+    writeFileSync(join(dir, "anderes.ts"), "");
+    symlinkSync(dir, join(dir, "verweis"), process.platform === "win32" ? "junction" : "dir");
+    const url = pathToFileURL(script).href;
+    expect(isMainModule(url, script)).toBe(true);
+    expect(isMainModule(url, join(dir, "verweis", "programm.ts"))).toBe(true);
+    expect(isMainModule(url, join(dir, "anderes.ts"))).toBe(false);
+    expect(isMainModule(url, join(dir, "fehlt.ts"))).toBe(false);
+    expect(isMainModule(url, undefined)).toBe(false);
   });
 });
