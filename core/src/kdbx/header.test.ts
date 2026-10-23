@@ -136,6 +136,24 @@ describe("Äußerer Header", () => {
     expect(() => serializeOuterHeader(sampleHeader({ publicCustomData: Uint8Array.of(1, 2, 3) }))).toThrow(code("Corrupt"));
   });
 
+  it("Namen aus Feld 11 und 12 gelangen nicht roh in die Fehlermeldung (Sicherheitsaudit leak-1)", () => {
+    // Nachbau des Angriffs aus dem Audit: Terminal leeren, Phishing-Text, HTML, Rest verbergen
+    const evil = "\u001b[2J\u001b[H\nMagentaCLOUD: Bitte Master-Passwort bestätigen\n<img src=x onerror=alert(1)>\u001b[8m";
+    const name = new TextEncoder().encode(evil);
+    const dict = new ByteWriter().writeU16(0x0100).writeU8(0x04).writeU32(name.length).writeBytes(name).writeU32(3).writeBytes(new Uint8Array(3)).writeU8(0).toBytes();
+    for (const id of [HeaderFieldId.KdfParameters, HeaderFieldId.PublicCustomData]) {
+      const fields = validFields().filter(([f]) => f !== id);
+      let message = "";
+      try {
+        parseOuterHeader(rawHeader([...fields, [id, dict], END]));
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/^VariantDictionary: Eintrag 0/);
+      expect(message).not.toMatch(/[\u0000-\u001f]/);
+    }
+  });
+
   it("schreibt nur unterstützte Einstellungen", () => {
     expect(() => serializeOuterHeader(sampleHeader({ cipher: "twofish" as never }))).toThrow(code("UnsupportedCipher"));
     expect(() => serializeOuterHeader(sampleHeader({ versionMinor: 2 as never }))).toThrow(code("UnsupportedVersion"));

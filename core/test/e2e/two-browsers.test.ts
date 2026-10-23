@@ -90,7 +90,7 @@ describe.skipIf(!webDavTestServerAvailable() || !hasKeepassxc())("Ende-zu-Ende: 
 
   it("Rennen mit 412: alle Änderungen beider Browser kommen an, KeePassXC sieht sie, jede Fassung einmal gesichert", async () => {
     // Ausgangslage: Vivaldi legt die Datei an, Chrome lädt sie herunter.
-    const initial = createNewVault({ name: "E2E", now: Date.now(), kdf: TEST_KDF });
+    const initial = createNewVault({ name: "E2E", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const clock = createVaultClock(initial);
     uuids.mail = createEntry(initial, initial.root.uuid, { Title: "Mail", UserName: "alice", Password: "alt" }, clock).uuid;
     uuids.forum = createEntry(initial, initial.root.uuid, { Title: "Forum", UserName: "f", Password: "forum-pw" }, clock).uuid;

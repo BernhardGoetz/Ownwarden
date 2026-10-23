@@ -15,7 +15,7 @@
  */
 import { KdbxError, type InnerStreamId, type PoolBinary } from "../contracts";
 import { ByteReader, ByteWriter, corrupt } from "./bytes";
-import { BINARY_FLAG_PROTECTED, InnerHeaderFieldId, InnerStreamNumber } from "./constants";
+import { BINARY_FLAG_PROTECTED, InnerHeaderFieldId, InnerStreamNumber, MAX_INNER_BINARIES } from "./constants";
 
 export interface InnerHeader {
   innerStreamId: InnerStreamId;
@@ -49,6 +49,8 @@ export function parseInnerHeader(plaintext: Uint8Array): { header: InnerHeader; 
         innerStreamKey = data.slice();
         break;
       case InnerHeaderFieldId.Binary:
+        // Sofort abbrechen, nicht erst am Ende zählen (Sicherheitsaudit crypto-4)
+        if (binaries.length === MAX_INNER_BINARIES) corrupt(`${CONTEXT}: mehr als ${MAX_INNER_BINARIES} Anhänge.`);
         binaries.push(decodeBinary(data, binaries.length));
         break;
       default:
@@ -89,7 +91,10 @@ export function serializeInnerHeader(header: InnerHeader): Uint8Array {
 
   writeField(writer, InnerHeaderFieldId.InnerRandomStreamId, new ByteWriter().writeU32(streamNumber).toBytes());
   writeField(writer, InnerHeaderFieldId.InnerRandomStreamKey, header.innerStreamKey);
+  let count = 0;
   for (const binary of header.binaries) {
+    // Nie eine Datei schreiben, die parseInnerHeader ablehnen würde
+    if (++count > MAX_INNER_BINARIES) throw new RangeError(`Mehr als ${MAX_INNER_BINARIES} Anhänge können nicht gespeichert werden.`);
     const flags = binary.protected ? BINARY_FLAG_PROTECTED : 0;
     // Flag-Byte und Daten bilden zusammen den Feldinhalt.
     writer.writeU8(InnerHeaderFieldId.Binary).writeU32(1 + binary.data.length).writeU8(flags).writeBytes(binary.data);
@@ -100,4 +105,15 @@ export function serializeInnerHeader(header: InnerHeader): Uint8Array {
 
 function writeField(writer: ByteWriter, fieldId: number, data: Uint8Array): void {
   writer.writeU8(fieldId).writeU32(data.length).writeBytes(data);
+}
+
+/**
+ * Länge, die serializeInnerHeader ergäbe – ohne die Anhänge zu kopieren. So kann
+ * encryptContainer einen zu großen Inhalt ablehnen, bevor es Hunderte MiB zusammensetzt.
+ */
+export function innerHeaderLength(header: InnerHeader): number {
+  // Strom-Nummer (5 + 4), Strom-Schlüssel (5 + n), Ende (5); je Anhang 5 + Flag-Byte + Daten
+  let length = 19 + header.innerStreamKey.length;
+  for (const binary of header.binaries) length += 6 + binary.data.length;
+  return length;
 }

@@ -20,13 +20,15 @@
  */
 import type { Credentials, KdfParams, Millis, Vault } from "../model";
 import { NULL_UUID } from "../model";
+import { wipe } from "./bytes";
 import { decryptContainer, encryptContainer } from "./container";
 import { createInnerStream, newInnerStreamKey } from "./inner-stream";
-import { validateKdfParams } from "./kdf";
+import { kdfBelowFloor, validateKdfParams } from "./kdf";
 import { defaultKdbxSettings } from "./settings";
 import { kdbxMinorVersionRequired, parseVaultXml, serializeVaultXml } from "./xml";
 import { stripInvalidXmlChars } from "./xml-dom";
 
+export { kdfBelowFloor, kdfWeakerThan } from "./kdf";
 export { defaultKdbxSettings } from "./settings";
 export { kdbxMinorVersionRequired } from "./xml";
 
@@ -40,9 +42,15 @@ export { kdbxMinorVersionRequired } from "./xml";
  */
 export async function readKdbx(file: Uint8Array, credentials: Credentials): Promise<Vault> {
   const payload = await decryptContainer(file, credentials);
-  // Für jedes Lesen ein FRISCHER Strom: Er ist zustandsbehaftet (siehe inner-stream.ts).
-  const stream = createInnerStream(payload.innerStreamId, payload.innerStreamKey);
-  return parseVaultXml(payload.xml, payload.binaries, stream, payload.settings);
+  try {
+    // Für jedes Lesen ein FRISCHER Strom: Er ist zustandsbehaftet (siehe inner-stream.ts).
+    const stream = createInnerStream(payload.innerStreamId, payload.innerStreamKey);
+    return parseVaultXml(payload.xml, payload.binaries, stream, payload.settings);
+  } finally {
+    // XML-Klartext und Stromschlüssel braucht nach dem Einlesen niemand mehr (Sicherheitsaudit
+    // crypto-5). Die Werte im Modell sind JavaScript-Strings – die lassen sich nicht löschen.
+    wipe(payload.xml, payload.innerStreamKey);
+  }
 }
 
 /**
@@ -59,8 +67,16 @@ export async function writeKdbx(vault: Vault, credentials: Credentials): Promise
   const innerStreamKey = newInnerStreamKey();
   const versionMinor = Math.max(vault.settings.versionMinor, kdbxMinorVersionRequired(vault)) as 0 | 1;
   const settings = { ...vault.settings, versionMinor };
-  const { xml, binaries } = serializeVaultXml({ ...vault, settings }, createInnerStream("chacha20", innerStreamKey));
-  return encryptContainer({ settings, innerStreamId: "chacha20", innerStreamKey, binaries, xml }, credentials);
+  try {
+    const { xml, binaries } = serializeVaultXml({ ...vault, settings }, createInnerStream("chacha20", innerStreamKey));
+    try {
+      return await encryptContainer({ settings, innerStreamId: "chacha20", innerStreamKey, binaries, xml }, credentials);
+    } finally {
+      wipe(xml); // Sicherheitsaudit crypto-5
+    }
+  } finally {
+    wipe(innerStreamKey);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,9 +100,15 @@ export interface NewVaultOptions {
   now: Millis;
   /**
    * Schlüsselableitung; Standard aus defaultKdbxSettings() (Argon2id, 64 MiB, 3 Iterationen,
-   * 2 Spuren). Kleinere Werte nur für Tests – sie machen das Erraten des Passworts billiger.
+   * 2 Spuren). Werte unter der Mindeststärke (KDF_FLOOR, kdfBelowFloor) werden abgelehnt,
+   * außer mit `allowWeakKdf`.
    */
   kdf?: KdfParams;
+  /**
+   * Nur für Tests und bewusst schwache Wegwerf-Tresore: erlaubt eine Schlüsselableitung unter
+   * der Mindeststärke. Sie macht das Erraten des Master-Passworts billig.
+   */
+  allowWeakKdf?: boolean;
 }
 
 /**
@@ -120,6 +142,11 @@ export function createNewVault(options: NewVaultOptions): Vault {
   const settings = defaultKdbxSettings();
   if (options.kdf !== undefined) {
     validateKdfParams(options.kdf);
+    // Sicherheitsaudit crypto-2: neue Tresore nie unter der Mindeststärke anlegen
+    const weakness = kdfBelowFloor(options.kdf);
+    if (weakness !== null && options.allowWeakKdf !== true) {
+      throw new RangeError(`createNewVault: ${weakness} Bitte stärkere Werte wählen (oder die Standardwerte).`);
+    }
     settings.kdf = options.kdf;
   }
   const times = { creation: now, lastModification: now, lastAccess: now, expiry: now, expires: false, usageCount: 0, locationChanged: now };

@@ -11,7 +11,7 @@
  */
 import { chacha20 } from "@noble/ciphers/chacha.js";
 import { KdbxError } from "../contracts";
-import { asBufferSource, concatBytes } from "./bytes";
+import { asBufferSource, concatBytes, wipe } from "./bytes";
 
 const subtle = (): SubtleCrypto => globalThis.crypto.subtle;
 
@@ -29,14 +29,27 @@ export function randomBytes(length: number): Uint8Array {
 
 /** SHA-256 über die aneinandergehängten Teile. */
 export async function sha256(...parts: Uint8Array[]): Promise<Uint8Array> {
-  const data = parts.length === 1 ? parts[0]! : concatBytes(...parts);
-  return new Uint8Array(await subtle().digest("SHA-256", asBufferSource(data)));
+  return digest("SHA-256", parts);
 }
 
 /** SHA-512 über die aneinandergehängten Teile. */
 export async function sha512(...parts: Uint8Array[]): Promise<Uint8Array> {
-  const data = parts.length === 1 ? parts[0]! : concatBytes(...parts);
-  return new Uint8Array(await subtle().digest("SHA-512", asBufferSource(data)));
+  return digest("SHA-512", parts);
+}
+
+/**
+ * Hash über mehrere Teile. Die dafür angelegte Kopie wird danach überschrieben: Die Teile sind
+ * oft Schlüssel (Master-Seed || transformierter Schlüssel, Blocknummer || HMAC-Basisschlüssel),
+ * und die Aufrufer können nur ihre eigenen Puffer löschen (Sicherheitsaudit crypto-5).
+ */
+async function digest(algorithm: "SHA-256" | "SHA-512", parts: Uint8Array[]): Promise<Uint8Array> {
+  if (parts.length === 1) return new Uint8Array(await subtle().digest(algorithm, asBufferSource(parts[0]!)));
+  const data = concatBytes(...parts);
+  try {
+    return new Uint8Array(await subtle().digest(algorithm, asBufferSource(data)));
+  } finally {
+    wipe(data);
+  }
 }
 
 /** HMAC-SHA-256 mit beliebig langem Schlüssel (KDBX nutzt 64-Byte-Schlüssel). */

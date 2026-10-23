@@ -63,7 +63,7 @@ describe.skipIf(!webDavTestServerAvailable())("Review cross-1: gescheiterte Schr
     };
     const adapter = new WebDavAdapter({ fileUrl, username: server.username, password: server.password, fetch: lockingFetch });
 
-    let vault: Vault = createNewVault({ name: "Review cross-1", now: Date.now(), kdf: TEST_KDF });
+    let vault: Vault = createNewVault({ name: "Review cross-1", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const mail = createEntry(vault, vault.root.uuid, { Title: "Mail", Password: "v0" }, createVaultClock(vault)).uuid;
     vault = (await syncVault(vault, adapter, codec, options())).vault;
     for (const version of ["v1", "v2", "v3"]) {

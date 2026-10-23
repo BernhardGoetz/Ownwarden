@@ -15,7 +15,7 @@
  *
  * Abgeglichen mit KeePassXC 2.7.6: src/streams/HmacBlockStream.cpp.
  */
-import { ByteReader, ByteWriter, bytesEqual, concatByteArrays, corrupt, u64le } from "./bytes";
+import { ByteReader, ByteWriter, bytesEqual, concatByteArrays, corrupt, u64le, wipe } from "./bytes";
 import { HMAC_BLOCK_SIZE, MAX_PAYLOAD_BYTES } from "./constants";
 import { hmacSha256, sha512 } from "./crypto";
 
@@ -30,7 +30,11 @@ export async function blockHmacKey(index: bigint, hmacBaseKey: Uint8Array): Prom
 /** HMAC eines Blocks; `sizeBytes` ist die int32-LE-Größenangabe genau wie in der Datei. */
 async function blockHmac(index: bigint, sizeBytes: Uint8Array, data: Uint8Array, hmacBaseKey: Uint8Array) {
   const key = await blockHmacKey(index, hmacBaseKey);
-  return hmacSha256(key, u64le(index), sizeBytes, data);
+  try {
+    return await hmacSha256(key, u64le(index), sizeBytes, data);
+  } finally {
+    wipe(key); // Blockschlüssel nach Gebrauch löschen (Sicherheitsaudit crypto-5)
+  }
 }
 
 /**

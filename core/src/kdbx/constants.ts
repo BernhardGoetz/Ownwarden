@@ -140,7 +140,7 @@ export const ARGON2_VERSION_13 = 0x13;
  * Grenzen für KDF-Parameter. Die KDF-Parameter stehen im Header und werden benutzt, BEVOR
  * die Header-Prüfsumme (HMAC) geprüft werden kann – eine manipulierte Datei könnte also
  * absurde Werte verlangen. Die Grenzen entsprechen denen von KeePassXC (Kdf.cpp,
- * Argon2Kdf.cpp), plus einer Speicher- und einer Aufwandsgrenze für Argon2 im Browser.
+ * Argon2Kdf.cpp), plus engeren Grenzen für Speicher, Parallelität und Aufwand von Argon2 im Browser.
  */
 export const KDF_LIMITS = {
   /** Salt/Seed-Länge in Byte (KeePassXC: KDF_MIN_SEED_SIZE..KDF_MAX_SEED_SIZE). */
@@ -148,19 +148,29 @@ export const KDF_LIMITS = {
   maxSaltLength: 32,
   /** Runden/Iterationen: 1 .. INT_MAX-1 (KeePassXC speichert sie als int). */
   maxRounds: 0x7fffffff - 1,
-  /** Argon2-Parallelität: 1 .. 2^24-1. */
-  maxParallelism: 0xffffff,
+  /**
+   * Argon2-Parallelität: höchstens 256 Spuren (Argon2 selbst erlaubt 2^24-1). KeePassXC setzt
+   * die Anzahl der Threads des PCs ein, KeePass 2 und Ownwarden 2 – 256 reicht großzügig.
+   * Warum begrenzt (Sicherheitsaudit crypto-1): hash-wasm rechnet je Spur zusätzlich zwei
+   * Hashes in JavaScript (gemessen 0,1–0,2 ms), ohne den Thread freizugeben. Mit 262 000 Spuren
+   * (vorher erlaubt) dauerte die schlimmste Einstellung 100 s statt 60 s; 256 Spuren kosten
+   * höchstens etwa 50 ms.
+   */
+  maxParallelism: 256,
   /** Argon2-Speicher: mindestens 8 KiB (Argon2 verlangt außerdem 8 KiB je Spur). */
   minMemoryBytes: 8 * 1024,
   /**
-   * Höchstens 2 GiB: WebAssembly im Browser kann ohnehin kaum mehr reservieren, und eine
-   * manipulierte Datei soll den Service Worker nicht mit Speicheranforderungen lahmlegen.
+   * Höchstens 1 GiB (Sicherheitsaudit crypto-6): hash-wasm 4.12 scheitert ab knapp 2 GiB
+   * („Invalid typed array length“, erst NACH dem Reservieren), Browser und Handys oft schon
+   * deutlich früher. 1 GiB ließ sich gemessen reservieren (Node 22, 2026-10) und liegt weit über
+   * üblichen Einstellungen (KeePassXC-Standard 64 MiB). Eine manipulierte Datei soll den Service
+   * Worker außerdem nicht mit Speicheranforderungen lahmlegen.
    */
-  maxMemoryBytes: 2 * 1024 * 1024 * 1024,
+  maxMemoryBytes: 1024 * 1024 * 1024,
   /**
    * Argon2-Arbeitsaufwand: höchstens 2^25 „KiB × Iterationen“ (Speicher in KiB mal Anzahl
-   * Durchläufe; die Rechenzeit wächst mit diesem Produkt, die Parallelität ändert daran in
-   * hash-wasm nichts, weil es nur einen Thread nutzt).
+   * Durchläufe; die Rechenzeit wächst mit diesem Produkt. hash-wasm nutzt nur einen Thread,
+   * die Spuren laufen also nacheinander; ihre Vorarbeit begrenzt maxParallelism).
    *
    * Warum nötig: Die Einzelgrenzen oben lassen z. B. 2^31 Iterationen zu. hash-wasm würde
    * damit Stunden bis Jahre rechnen und blockiert dabei den GANZEN Thread (der Service
@@ -186,6 +196,38 @@ export const KDF_LIMITS = {
   maxArgon2WorkKiBIterations: 2 ** 25,
 } as const;
 
+/**
+ * Mindeststärke der Schlüsselableitung (Sicherheitsaudit crypto-2). Darunter wird das Erraten
+ * des Master-Passworts zu billig. createNewVault lehnt schwächere Werte ab; beim Lesen und
+ * Zurückschreiben bestehender Dateien gilt die Grenze NICHT (sonst wäre der eigene Tresor
+ * gesperrt) – dort kann der Aufrufer mit kdfBelowFloor/kdfWeakerThan (kdf.ts) warnen.
+ */
+export const KDF_FLOOR = {
+  /**
+   * Argon2: die gleichwertigen Mindest-Einstellungen aus dem OWASP Password Storage Cheat Sheet
+   * (Argon2id, Parallelität 1): 46 MiB × 1, 19 MiB × 2, 12 MiB × 3, 9 MiB × 4, 7 MiB × 5
+   * Iterationen. Es genügt, eine Zeile zu erreichen (mindestens so viel Speicher UND so viele
+   * Iterationen). Für Argon2d gilt dasselbe.
+   */
+  argon2: [
+    { memoryKiB: 46 * 1024, iterations: 1 },
+    { memoryKiB: 19 * 1024, iterations: 2 },
+    { memoryKiB: 12 * 1024, iterations: 3 },
+    { memoryKiB: 9 * 1024, iterations: 4 },
+    { memoryKiB: 7 * 1024, iterations: 5 },
+  ],
+  /**
+   * AES-KDF: 6 Millionen Runden. OWASP nennt für AES-KDF keinen Wert; Maßstab ist die
+   * OWASP-Vorgabe für PBKDF2-HMAC-SHA256 (600 000 Iterationen ≈ 1,2 Mio. SHA-256-Blöcke je
+   * Rateversuch). AES-KDF rechnet je Runde zwei AES-Blöcke, und ein AES-Block ist (AES-NI,
+   * Grafikkarten) grob 10-mal billiger als ein SHA-256-Block: 2 × 6 Mio. AES ≈ 1,2 Mio. SHA-256.
+   * AES-KDF bleibt dabei nicht speicherhart, also schwächer als Argon2. Zum Vergleich:
+   * KeePassXC wählt für „1 s“ auf der Test-VM rund 64 Mio. Runden; Ownwarden braucht für
+   * 6 Mio. Runden etwa 0,25 s.
+   */
+  aesRounds: 6_000_000,
+} as const;
+
 /** Fester 8-Byte-Nonce des Salsa20-Zufallsstroms (KeePass2::INNER_STREAM_SALSA20_IV). */
 export const SALSA20_INNER_STREAM_NONCE = new Uint8Array([0xe8, 0x30, 0x09, 0x4b, 0x97, 0x20, 0x5d, 0x2a]);
 
@@ -193,10 +235,21 @@ export const SALSA20_INNER_STREAM_NONCE = new Uint8Array([0xe8, 0x30, 0x09, 0x4b
 export const HMAC_BLOCK_SIZE = 1024 * 1024;
 
 /**
- * Obergrenze für den entschlüsselten (und entpackten) Inhalt. Schützt vor „Zip-Bomben“ und
- * Speicherüberlauf im Service Worker. 512 MiB reichen auch für Datenbanken mit Anhängen.
+ * Obergrenze für den entschlüsselten (und entpackten) Inhalt: innerer Header mit allen Anhängen
+ * plus XML. Schützt vor „Zip-Bomben“ und Speicherüberlauf im Service Worker und auf dem Handy
+ * (Sicherheitsaudit dos-4: vorher 512 MiB; beim Lesen liegt der Inhalt mehrfach im Speicher).
+ * 256 MiB reichen auch für Datenbanken mit Anhängen. Gilt beim Lesen UND beim Schreiben
+ * (encryptContainer), damit Ownwarden nie eine Datei schreibt, die es selbst nicht mehr öffnet.
  */
-export const MAX_PAYLOAD_BYTES = 512 * 1024 * 1024;
+export const MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Höchstzahl der Anhänge im inneren Header (Sicherheitsaudit crypto-4). Ein leerer Anhang
+ * kostet in der Datei 6 Byte, im Speicher über 200 Byte: Ohne Grenze reichte eine kleine,
+ * stark komprimierte Datei für Gigabytes an Objekten. Gleiche Anhänge legt der Writer nur
+ * einmal ab; 100 000 verschiedene Anhänge hat kein echter Tresor.
+ */
+export const MAX_INNER_BINARIES = 100_000;
 
 /**
  * Obergrenze für das XML-Dokument (UTF-8-Byte), bevor es dem XML-Parser übergeben wird

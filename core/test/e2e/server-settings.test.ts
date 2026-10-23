@@ -56,7 +56,7 @@ describe.skipIf(!webDavTestServerAvailable() || !hasKeepassxc())("Ende-zu-Ende: 
     const adapter = new WebDavAdapter({ fileUrl, username: server.username, password: server.password });
 
     // 1. Vivaldi legt an.
-    const initial = createNewVault({ name: "Einstellungen", now: Date.now(), kdf: TEST_KDF });
+    const initial = createNewVault({ name: "Einstellungen", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const mail = createEntry(initial, initial.root.uuid, { Title: "Mail", Password: "p0" }, createVaultClock(initial)).uuid;
     let vivaldi = (await syncVault(initial, adapter, codec, options())).vault;
     expect(vivaldi.meta.historyMaxItems).toBe(10);

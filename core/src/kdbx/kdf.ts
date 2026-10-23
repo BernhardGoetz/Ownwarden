@@ -14,7 +14,7 @@ import { argon2d, argon2id } from "hash-wasm";
 import { KdbxError } from "../contracts";
 import type { KdfParams } from "../model";
 import { bytesToUuid, uuidToBytes, wipe } from "./bytes";
-import { ARGON2_VERSION_13, KDF_LIMITS, KDF_UUID, KdfParamKey } from "./constants";
+import { ARGON2_VERSION_13, KDF_FLOOR, KDF_LIMITS, KDF_UUID, KdfParamKey } from "./constants";
 import { aesCbcEncrypt, importAesCbcKey, randomBytes, sha256 } from "./crypto";
 import {
   getBytes,
@@ -134,8 +134,8 @@ function checkRange(name: string, value: number, min: number, max: number): void
 }
 
 /**
- * Prüft KDF-Parameter gegen die Grenzen von KeePassXC (plus eine Speicher- und eine
- * Aufwandsgrenze für Argon2 im Browser, siehe KDF_LIMITS). Wirft KdbxError("UnsupportedKdf"). Wird beim Lesen UND vor dem Schreiben
+ * Prüft KDF-Parameter gegen die Grenzen von KeePassXC (plus engere Grenzen für Speicher,
+ * Parallelität und Aufwand von Argon2 im Browser, siehe KDF_LIMITS). Wirft KdbxError("UnsupportedKdf"). Wird beim Lesen UND vor dem Schreiben
  * aufgerufen, damit Ownwarden nie eine Datei schreibt, die KeePassXC nicht öffnen kann.
  */
 export function validateKdfParams(params: KdfParams): void {
@@ -155,7 +155,14 @@ export function validateKdfParams(params: KdfParams): void {
   }
   checkRange("P (Parallelität)", params.parallelism, 1, KDF_LIMITS.maxParallelism);
   checkRange("I (Iterationen)", params.iterations, 1, KDF_LIMITS.maxRounds);
-  checkRange("M (Speicher in Byte)", params.memoryBytes, KDF_LIMITS.minMemoryBytes, KDF_LIMITS.maxMemoryBytes);
+  checkRange("M (Speicher in Byte)", params.memoryBytes, KDF_LIMITS.minMemoryBytes, Number.MAX_SAFE_INTEGER);
+  if (params.memoryBytes > KDF_LIMITS.maxMemoryBytes) {
+    unsupported(
+      `Argon2 verlangt ${mebibytes(params.memoryBytes)} MiB Arbeitsspeicher, Ownwarden erlaubt höchstens ` +
+        `${mebibytes(KDF_LIMITS.maxMemoryBytes)} MiB (mehr können Browser und Handy nicht reservieren). ` +
+        "Bitte in KeePassXC unter Datenbank-Einstellungen → Sicherheit weniger Speicher einstellen.",
+    );
+  }
   // Argon2 verlangt mindestens 8 KiB je Spur (Lane); hash-wasm würde sonst einen Fehler werfen.
   if (argon2MemoryKiB(params.memoryBytes) < 8 * params.parallelism) {
     unsupported(`Argon2 braucht mindestens 8 KiB Speicher je Spur (P = ${params.parallelism}).`);
@@ -173,6 +180,59 @@ export function validateKdfParams(params: KdfParams): void {
 /** KDBX speichert den Speicher in Byte, Argon2 rechnet in KiB (abgerundet wie bei KeePassXC). */
 function argon2MemoryKiB(memoryBytes: number): number {
   return Math.floor(memoryBytes / 1024);
+}
+
+/** Byte -> MiB für Meldungen (aufgerundet, damit „zu groß“ nie wie die Grenze selbst aussieht). */
+function mebibytes(bytes: number): number {
+  return Math.ceil(bytes / (1024 * 1024));
+}
+
+// ---------------------------------------------------------------------------
+// Mindeststärke (Sicherheitsaudit crypto-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Liegen die Parameter unter der Mindeststärke (KDF_FLOOR)? Liefert dann den Grund als
+ * deutschen Satz, sonst null. Prüft NICHT die Gültigkeit (dafür validateKdfParams).
+ *
+ * Beim Anlegen eines Tresors lehnt createNewVault solche Werte ab. Bestehende Dateien lesen und
+ * schreiben bleibt erlaubt; ob dann gewarnt oder nachgefragt wird, entscheidet der Aufrufer.
+ */
+export function kdfBelowFloor(params: KdfParams): string | null {
+  if (params.type === "aes") {
+    if (params.rounds >= KDF_FLOOR.aesRounds) return null;
+    return (
+      `AES-KDF mit ${params.rounds} Runden liegt unter der Mindeststärke von ` +
+      `${KDF_FLOOR.aesRounds} Runden – das Master-Passwort ließe sich zu billig erraten.`
+    );
+  }
+  const memoryKiB = argon2MemoryKiB(params.memoryBytes);
+  if (KDF_FLOOR.argon2.some((row) => memoryKiB >= row.memoryKiB && params.iterations >= row.iterations)) return null;
+  const rows = KDF_FLOOR.argon2.map((row) => `${row.memoryKiB / 1024} MiB × ${row.iterations}`).join(", ");
+  return (
+    `Argon2 mit ${(memoryKiB / 1024).toFixed(1).replace(".", ",")} MiB × ${params.iterations} Iterationen liegt unter ` +
+    `der Mindeststärke (OWASP: ${rows}) – das Master-Passwort ließe sich zu billig erraten.`
+  );
+}
+
+/**
+ * Ist `a` schwächer als `b`, also das Erraten des Passworts mit `a` billiger? Für die Frage
+ * „hat jemand die Schlüsselableitung abgeschwächt?“, z. B. beim Abgleich mit der zuletzt
+ * bestätigten Einstellung. Regeln:
+ *   - Argon2 -> AES-KDF: immer schwächer (AES-KDF ist nicht speicherhart).
+ *   - AES-KDF -> Argon2: nur schwächer, wenn das neue Argon2 unter der Mindeststärke liegt,
+ *     die alte AES-KDF aber nicht.
+ *   - AES-KDF: weniger Runden.
+ *   - Argon2: weniger Speicher ODER weniger „Speicher × Iterationen“. Parallelität und
+ *     Argon2d/Argon2id spielen für die Kosten eines Angreifers keine wesentliche Rolle.
+ */
+export function kdfWeakerThan(a: KdfParams, b: KdfParams): boolean {
+  if (a.type === "aes" && b.type === "aes") return a.rounds < b.rounds;
+  if (a.type === "aes") return true;
+  if (b.type === "aes") return kdfBelowFloor(a) !== null && kdfBelowFloor(b) === null;
+  const memoryA = argon2MemoryKiB(a.memoryBytes);
+  const memoryB = argon2MemoryKiB(b.memoryBytes);
+  return memoryA < memoryB || memoryA * a.iterations < memoryB * b.iterations;
 }
 
 /** Kopie der Parameter mit neuem, zufälligem Salt bzw. Seed (für jedes Speichern). */
@@ -202,7 +262,14 @@ export async function transformKey(compositeKey: Uint8Array, params: KdfParams):
       outputType: "binary",
     });
   } catch (error) {
-    // z. B. nicht genug Speicher für WebAssembly
+    // Kein Speicher für WebAssembly: hash-wasm wirft dann einen RangeError („Invalid typed array
+    // length“, „Array buffer allocation failed“ o. ä.) – verständlich melden (Sicherheitsaudit crypto-6).
+    if (error instanceof RangeError) {
+      unsupported(
+        `Argon2 konnte die verlangten ${mebibytes(params.memoryBytes)} MiB Arbeitsspeicher nicht reservieren. ` +
+          "Bitte in KeePassXC unter Datenbank-Einstellungen → Sicherheit weniger Speicher einstellen.",
+      );
+    }
     unsupported(`Argon2 fehlgeschlagen: ${(error as Error).message}`);
   }
 }
@@ -232,19 +299,22 @@ export async function aesKdf(
   if (key.length !== 32) throw new RangeError("AES-KDF erwartet einen 32-Byte-Schlüssel.");
   const cryptoKey = await importAesCbcKey(seed, "encrypt");
   // Beide Hälften sind unabhängig voneinander (ECB) und können parallel laufen.
-  const [left, right] = await Promise.all([
-    repeatAesEncrypt(cryptoKey, key.slice(0, 16), rounds, chunkBlocks),
-    repeatAesEncrypt(cryptoKey, key.slice(16, 32), rounds, chunkBlocks),
-  ]);
+  const halves = [key.slice(0, 16), key.slice(16, 32)];
+  const [left, right] = await Promise.all(halves.map((half) => repeatAesEncrypt(cryptoKey, half, rounds, chunkBlocks)));
   const transformed = new Uint8Array(32);
-  transformed.set(left, 0);
-  transformed.set(right, 16);
+  transformed.set(left!, 0);
+  transformed.set(right!, 16);
   const result = await sha256(transformed);
-  wipe(left, right, transformed);
+  wipe(...halves, left, right, transformed);
   return result;
 }
 
-/** Verschlüsselt einen 16-Byte-Block `rounds`-mal mit AES (über die CBC-Eigenschaft, s. o.). */
+/**
+ * Verschlüsselt einen 16-Byte-Block `rounds`-mal mit AES (über die CBC-Eigenschaft, s. o.).
+ * Jeder Zwischenstand (und jeder Chiffretext-Chunk, der alle Zwischenstände enthält) wird
+ * überschrieben: Aus jedem einzelnen ließe sich mit dem öffentlichen Seed der zusammengesetzte
+ * Schlüssel zurückrechnen (Sicherheitsaudit crypto-5). `block` überschreibt der Aufrufer.
+ */
 async function repeatAesEncrypt(
   cryptoKey: CryptoKey,
   block: Uint8Array,
@@ -258,8 +328,11 @@ async function repeatAesEncrypt(
     const count = Math.min(remaining, chunkBlocks);
     const ciphertext = await aesCbcEncrypt(cryptoKey, state, zeros.subarray(0, count * 16));
     // Block Nummer `count` (1-basiert) ist das Ergebnis; danach folgt nur noch der Padding-Block.
-    state = ciphertext.slice((count - 1) * 16, count * 16);
+    const next = ciphertext.slice((count - 1) * 16, count * 16);
+    wipe(ciphertext);
+    if (state !== block) wipe(state);
+    state = next;
     remaining -= count;
   }
-  return state;
+  return state === block ? block.slice() : state;
 }

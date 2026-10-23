@@ -207,7 +207,8 @@ async function commandInit(args: string[], io: CliIo): Promise<void> {
   if (existsSync(file)) throw new CliError(`${file} gibt es schon. init überschreibt nie eine Datei.`);
   const credentials = await masterCredentials(io, file, { isNew: true });
   const name = values.name ?? basename(file).replace(/\.kdbx$/i, "");
-  const vault = createNewVault({ name, now: now(io), ...(io.newVaultKdf ? { kdf: io.newVaultKdf } : {}) });
+  // Die Test-KDF ist absichtlich schwach (schnell); ohne sie gelten die Standardwerte.
+  const vault = createNewVault({ name, now: now(io), ...(io.newVaultKdf ? { kdf: io.newVaultKdf, allowWeakKdf: true } : {}) });
   await saveVault(file, vault, credentials);
   io.out(`Neue Datenbank „${name}“ angelegt: ${file}`);
   io.out("Hinweis: Prototyp – nur für Testdaten.");

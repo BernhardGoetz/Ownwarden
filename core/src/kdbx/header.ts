@@ -113,6 +113,23 @@ export function parseOuterHeader(file: Uint8Array): ParsedOuterHeader {
   return { header, headerBytes: file.subarray(0, reader.offset) };
 }
 
+/**
+ * Länge des äußeren Headers (bis einschließlich EndOfHeader), OHNE die Felder auszuwerten.
+ * decryptContainer prüft damit die Header-SHA-256, bevor parseOuterHeader die KDF-Parameter
+ * bewertet: Ein zufällig beschädigter Header soll „beschädigt“ heißen und nicht zum Ändern der
+ * KDF-Einstellungen raten (Sicherheitsaudit crypto-1).
+ */
+export function outerHeaderLength(file: Uint8Array): number {
+  const reader = new ByteReader(file, CONTEXT);
+  readSignatureAndVersion(file, reader);
+  for (;;) {
+    const fieldId = reader.readU8("Feld-ID");
+    const length = reader.readU32(`Länge von Feld ${fieldId}`);
+    reader.readView(length, `Daten von Feld ${fieldId}`);
+    if (fieldId === HeaderFieldId.EndOfHeader) return reader.offset;
+  }
+}
+
 /** Prüft die Signaturen und liefert die Nebenversion (0 oder 1). */
 function readSignatureAndVersion(file: Uint8Array, reader: ByteReader): 0 | 1 {
   if (file.length < 8) throw new KdbxError("BadSignature", "Die Datei ist zu kurz für eine KDBX-Datei.");

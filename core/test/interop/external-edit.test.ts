@@ -41,7 +41,7 @@ describe.skipIf(!hasKeepassxc())("Integration (d): Feld-Zeitstempel und Erkennun
 
   beforeAll(async () => {
     dir = createTmpDir("interop-d");
-    const vault = createNewVault({ name: "Extern", now: Date.now(), kdf: TEST_KDF });
+    const vault = createNewVault({ name: "Extern", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const clock = createVaultClock(vault);
     uuids.mail = createEntry(vault, vault.root.uuid, { Title: "Mail", UserName: "alice", Password: "alt", URL: "https://mail.example" }, clock).uuid;
     uuids.bank = createEntry(vault, vault.root.uuid, { Title: "Bank", UserName: "bob", Password: "bank-pw" }, clock).uuid;

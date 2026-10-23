@@ -4,8 +4,18 @@ import { argon2d as nobleArgon2d, argon2id as nobleArgon2id } from "@noble/hashe
 import { describe, expect, it } from "vitest";
 import type { KdfParams } from "../model";
 import { uuidToBytes } from "./bytes";
-import { KDF_UUID } from "./constants";
-import { aesKdf, parseKdfParameters, serializeKdfParameters, transformKey, validateKdfParams, withFreshKdfSalt } from "./kdf";
+import { KDF_LIMITS, KDF_UUID } from "./constants";
+import {
+  aesKdf,
+  kdfBelowFloor,
+  kdfWeakerThan,
+  parseKdfParameters,
+  serializeKdfParameters,
+  transformKey,
+  validateKdfParams,
+  withFreshKdfSalt,
+} from "./kdf";
+import { defaultKdbxSettings } from "./settings";
 import { parseVariantDictionary, serializeVariantDictionary, type VariantDictionary, type VariantValue } from "./variant-dictionary";
 
 const corrupt = expect.objectContaining({ code: "Corrupt" });
@@ -166,6 +176,87 @@ describe("KDF-Parameter lesen und schreiben", () => {
     expect(() => validateKdfParams({ type: "aes", seed: SEED, rounds: 0 })).toThrow(unsupportedKdf);
     expect(() => validateKdfParams({ type: "aes", seed: SEED, rounds: 1.5 })).toThrow(unsupportedKdf);
     expect(() => serializeKdfParameters({ type: "aes", seed: SEED, rounds: -1 })).toThrow(unsupportedKdf);
+  });
+});
+
+describe("Grenzen gegen manipulierte Header", () => {
+  it("begrenzt die Argon2-Parallelität auf 256 Spuren (Sicherheitsaudit crypto-1)", () => {
+    // hash-wasm rechnet je Spur zusätzlich etwa 0,1–0,2 ms Vorarbeit, ohne den Thread
+    // freizugeben. Speicher × Iterationen allein begrenzte das nicht: 1 GiB × 32 mit 131 072
+    // Spuren lag innerhalb aller bisherigen Grenzen.
+    expect(() => validateKdfParams(argon2Params({ parallelism: 256, memoryBytes: 64 * 1024 * 1024 }))).not.toThrow();
+    expect(() => validateKdfParams(argon2Params({ parallelism: 257, memoryBytes: 64 * 1024 * 1024 }))).toThrow(unsupportedKdf);
+    const lanes = dictWith([
+      ["$UUID", { type: "bytes", value: uuidToBytes(KDF_UUID.argon2id) }],
+      ["I", { type: "uint64", value: 32n }],
+      ["M", { type: "uint64", value: 1024n ** 3n }],
+      ["P", { type: "uint32", value: 131_072 }],
+      ["S", { type: "bytes", value: new Uint8Array(32) }],
+      ["V", { type: "uint32", value: 0x13 }],
+    ]);
+    expect(() => parseKdfParameters(lanes)).toThrow(unsupportedKdf);
+  });
+
+  it("lehnt mehr als 1 GiB Argon2-Speicher mit klarer Meldung ab (Sicherheitsaudit crypto-6)", () => {
+    // hash-wasm scheitert bei 2 GiB erst nach dem Reservieren mit „Invalid typed array length“.
+    expect(KDF_LIMITS.maxMemoryBytes).toBe(1024 ** 3);
+    expect(() => validateKdfParams(argon2Params({ memoryBytes: 1024 ** 3, iterations: 1, parallelism: 1 }))).not.toThrow();
+    for (const memoryBytes of [1024 ** 3 + 1024, 2 * 1024 ** 3]) {
+      expect(() => validateKdfParams(argon2Params({ memoryBytes, iterations: 1, parallelism: 1 }))).toThrow(
+        expect.objectContaining({ code: "UnsupportedKdf", message: expect.stringMatching(/Arbeitsspeicher.*höchstens 1024 MiB/) }),
+      );
+    }
+  });
+});
+
+describe("Mindeststärke der Schlüsselableitung (Sicherheitsaudit crypto-2)", () => {
+  const MiB = 1024 * 1024;
+  const aes = (rounds: number): KdfParams => ({ type: "aes", seed: SEED, rounds });
+
+  it("kdfBelowFloor: OWASP-Mindestwerte für Argon2, 6 Mio. Runden für AES-KDF", () => {
+    const strongEnough: KdfParams[] = [
+      defaultKdbxSettings().kdf,
+      argon2Params({ memoryBytes: 19 * MiB, iterations: 2, parallelism: 1 }),
+      argon2Params({ memoryBytes: 46 * MiB, iterations: 1 }),
+      argon2Params({ memoryBytes: 12 * MiB, iterations: 3 }),
+      argon2Params({ memoryBytes: 9 * MiB, iterations: 4 }),
+      argon2Params({ type: "argon2d", memoryBytes: 7 * MiB, iterations: 5 }),
+      argon2Params({ memoryBytes: 1024 * MiB, iterations: 1, parallelism: 8 }),
+      aes(6_000_000),
+      aes(63_829_788), // KeePassXC-CLI, „1 s“ auf der Test-VM
+    ];
+    for (const params of strongEnough) expect(kdfBelowFloor(params), JSON.stringify({ ...params, salt: 0, seed: 0 })).toBeNull();
+
+    const tooWeak: KdfParams[] = [
+      argon2Params({ memoryBytes: 1 * MiB, iterations: 2 }), // KeePass-Standard
+      argon2Params({ memoryBytes: 8 * 1024, iterations: 1, parallelism: 1 }),
+      argon2Params({ memoryBytes: 19 * MiB - 1024, iterations: 2 }),
+      argon2Params({ memoryBytes: 45 * MiB, iterations: 1 }),
+      argon2Params({ memoryBytes: 6 * MiB, iterations: 1000 }),
+      aes(1),
+      aes(5_999_999),
+    ];
+    for (const params of tooWeak) {
+      expect(kdfBelowFloor(params), JSON.stringify({ ...params, salt: 0, seed: 0 })).toMatch(/Mindeststärke/);
+    }
+  });
+
+  it("kdfWeakerThan: erkennt jeden Schritt zu billigeren Rateversuchen", () => {
+    const base = argon2Params({ memoryBytes: 64 * MiB, iterations: 3, parallelism: 2 });
+    // weniger Speicher (auch bei mehr Iterationen) oder weniger Speicher × Iterationen
+    expect(kdfWeakerThan(argon2Params({ memoryBytes: 32 * MiB, iterations: 100 }), base)).toBe(true);
+    expect(kdfWeakerThan(argon2Params({ memoryBytes: 64 * MiB, iterations: 2 }), base)).toBe(true);
+    expect(kdfWeakerThan(argon2Params({ memoryBytes: 64 * MiB, iterations: 3, parallelism: 1, type: "argon2d" }), base)).toBe(false);
+    expect(kdfWeakerThan(argon2Params({ memoryBytes: 128 * MiB, iterations: 3 }), base)).toBe(false);
+    expect(kdfWeakerThan(base, base)).toBe(false);
+    // Argon2 -> AES-KDF ist immer ein Rückschritt (nicht speicherhart)
+    expect(kdfWeakerThan(aes(2_000_000_000), base)).toBe(true);
+    // AES-KDF: weniger Runden
+    expect(kdfWeakerThan(aes(5_000_000), aes(6_000_000))).toBe(true);
+    expect(kdfWeakerThan(aes(6_000_000), aes(6_000_000))).toBe(false);
+    // AES-KDF -> Argon2 nur dann ein Rückschritt, wenn Argon2 unter die Mindeststärke fällt
+    expect(kdfWeakerThan(base, aes(60_000_000))).toBe(false);
+    expect(kdfWeakerThan(argon2Params({ memoryBytes: 8 * 1024, iterations: 1 }), aes(60_000_000))).toBe(true);
   });
 });
 

@@ -73,7 +73,7 @@ describe("öffentliche Schnittstelle: läuft ohne Node-APIs (Service Worker)", (
 describe("writeKdbx verändert das Modell nicht", () => {
   it("weder den Tresor (tief verglichen) noch das an createNewVault übergebene KDF-Objekt", async () => {
     const kdf: KdfParams = { type: "argon2id", salt: new Uint8Array(32), parallelism: 1, memoryBytes: 1 << 20, iterations: 2, version: 0x13 };
-    const vault = createNewVault({ name: "Unverändert", now: Date.now(), kdf });
+    const vault = createNewVault({ name: "Unverändert", now: Date.now(), kdf, allowWeakKdf: true });
     const clock = createVaultClock(vault);
     const group = createGroup(vault, vault.root.uuid, "Bank", clock);
     const entry = createEntry(vault, group.uuid, { Title: "Giro", Password: "pw", Notes: "Zeile 1\r\nZeile 2", PIN: { value: "1", protected: true } }, clock);

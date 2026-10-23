@@ -13,6 +13,7 @@
  * KeePassXC liest die Längen als uint32 (KeePass als int32); für gültige Dateien ist das
  * gleich. Wir prüfen jede Länge gegen die tatsächlich vorhandenen Bytes.
  */
+import { displayText } from "../display-text";
 import { VARIANT_DICTIONARY_CRITICAL_MASK, VARIANT_DICTIONARY_VERSION } from "./constants";
 import { ByteReader, ByteWriter, corrupt, utf8Decode, utf8Encode } from "./bytes";
 
@@ -56,24 +57,38 @@ export function parseVariantDictionary(bytes: Uint8Array): VariantDictionary {
   }
 
   const dict: VariantDictionary = new Map();
-  for (;;) {
+  for (let index = 0; ; index++) {
     const type = reader.readU8("Typ (fehlendes Ende-Zeichen?)");
     if (type === VariantType.End) return dict;
 
-    const nameLength = reader.readU32("Namenslänge");
-    const name = utf8Decode(reader.readView(nameLength, "Name"));
-    const valueLength = reader.readU32(`Wertlänge von "${name}"`);
-    const value = reader.readView(valueLength, `Wert von "${name}"`);
-    dict.set(name, decodeValue(type, name, value));
+    const nameLength = reader.readU32(`Namenslänge von Eintrag ${index}`);
+    const name = utf8Decode(reader.readView(nameLength, `Name von Eintrag ${index}`));
+    const label = entryLabel(index, name);
+    const valueLength = reader.readU32(`Wertlänge von ${label}`);
+    const value = reader.readView(valueLength, `Wert von ${label}`);
+    dict.set(name, decodeValue(type, label, value));
   }
 }
 
-/** Wandelt die Wert-Bytes je nach Typ um und prüft die Länge. */
-function decodeValue(type: number, name: string, value: Uint8Array): VariantValue {
+/** Höchstlänge eines Namens in Fehlermeldungen; echte Namen sind kurz ("$UUID", "S", "KPXC_…"). */
+const NAME_IN_MESSAGE_LENGTH = 32;
+
+/**
+ * Bezeichnung eines Eintrags für Fehlermeldungen. Der Name stammt aus dem äußeren Header, der
+ * gelesen wird, BEVOR irgendetwas geprüft werden kann – ein Angreifer wählt ihn frei
+ * (Terminal-Steuerzeichen, Zeilenumbrüche, Megabytes). Deshalb nur entschärft und gekürzt
+ * (Sicherheitsaudit leak-1).
+ */
+function entryLabel(index: number, name: string): string {
+  return `Eintrag ${index} ("${displayText(name, NAME_IN_MESSAGE_LENGTH)}")`;
+}
+
+/** Wandelt die Wert-Bytes je nach Typ um und prüft die Länge. `label` nennt den Eintrag (entryLabel). */
+function decodeValue(type: number, label: string, value: Uint8Array): VariantValue {
   const view = new DataView(value.buffer, value.byteOffset, value.byteLength);
   const expectLength = (length: number): void => {
     if (value.length !== length) {
-      corrupt(`${CONTEXT}: "${name}" hat ${value.length} statt ${length} Byte.`);
+      corrupt(`${CONTEXT}: ${label} hat ${value.length} statt ${length} Byte.`);
     }
   };
 
@@ -99,7 +114,7 @@ function decodeValue(type: number, name: string, value: Uint8Array): VariantValu
       // Kopie, damit das Ergebnis nicht am (großen) Eingabepuffer hängt.
       return { type: "bytes", value: value.slice() };
     default:
-      return corrupt(`${CONTEXT}: unbekannter Typ 0x${type.toString(16)} bei "${name}".`);
+      return corrupt(`${CONTEXT}: unbekannter Typ 0x${type.toString(16)} bei ${label}.`);
   }
 }
 
@@ -154,7 +169,7 @@ export function getInteger(dict: VariantDictionary, name: string): bigint | unde
     case "int64":
       return item.value;
     default:
-      return corrupt(`${CONTEXT}: "${name}" ist keine Zahl (Typ ${item.type}).`);
+      return corrupt(`${CONTEXT}: "${displayText(name, NAME_IN_MESSAGE_LENGTH)}" ist keine Zahl (Typ ${item.type}).`);
   }
 }
 
@@ -162,6 +177,8 @@ export function getInteger(dict: VariantDictionary, name: string): bigint | unde
 export function getBytes(dict: VariantDictionary, name: string): Uint8Array | undefined {
   const item = dict.get(name);
   if (item === undefined) return undefined;
-  if (item.type !== "bytes") corrupt(`${CONTEXT}: "${name}" ist kein Byte-Array (Typ ${item.type}).`);
+  if (item.type !== "bytes") {
+    corrupt(`${CONTEXT}: "${displayText(name, NAME_IN_MESSAGE_LENGTH)}" ist kein Byte-Array (Typ ${item.type}).`);
+  }
   return item.value;
 }

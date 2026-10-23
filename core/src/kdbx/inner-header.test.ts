@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ByteWriter, toHex, utf8Decode, utf8Encode } from "./bytes";
-import { parseInnerHeader, serializeInnerHeader, type InnerHeader } from "./inner-header";
+import { MAX_INNER_BINARIES } from "./constants";
+import { innerHeaderLength, parseInnerHeader, serializeInnerHeader, type InnerHeader } from "./inner-header";
 
 const code = (c: string) => expect.objectContaining({ code: c });
 const KEY = new Uint8Array(64).fill(9);
@@ -71,6 +72,41 @@ describe("Innerer Header", () => {
     const parsed = parseInnerHeader(raw([[1, u32(3)], [7, Uint8Array.of(1, 2)], [2, KEY], [0, new Uint8Array(0)]], "x"));
     expect(parsed.header.innerStreamKey).toEqual(KEY);
     expect(utf8Decode(parsed.xml)).toBe("x");
+  });
+
+  it("höchstens 100 000 Anhänge, beim Lesen und beim Schreiben (Sicherheitsaudit crypto-4)", () => {
+    // Ein leerer Anhang kostet in der Datei 6 Byte, im Speicher über 200 Byte.
+    expect(MAX_INNER_BINARIES).toBe(100_000);
+    const fields = (count: number): Uint8Array => {
+      const w = new ByteWriter().writeU8(1).writeU32(4).writeU32(3).writeU8(2).writeU32(KEY.length).writeBytes(KEY);
+      for (let i = 0; i < count; i++) w.writeU8(3).writeU32(1).writeU8(0);
+      return w.writeU8(0).writeU32(0).toBytes();
+    };
+    expect(parseInnerHeader(fields(MAX_INNER_BINARIES)).header.binaries).toHaveLength(MAX_INNER_BINARIES);
+    expect(() => parseInnerHeader(fields(MAX_INNER_BINARIES + 1))).toThrow(code("Corrupt"));
+    expect(() => parseInnerHeader(fields(MAX_INNER_BINARIES + 1))).toThrow(/mehr als 100000 Anhänge/);
+
+    const shared = { data: new Uint8Array(0), protected: false };
+    const header = (count: number): InnerHeader => ({
+      innerStreamId: "chacha20",
+      innerStreamKey: KEY,
+      binaries: Array.from({ length: count }, () => shared),
+    });
+    expect(serializeInnerHeader(header(MAX_INNER_BINARIES))).toEqual(fields(MAX_INNER_BINARIES));
+    expect(() => serializeInnerHeader(header(MAX_INNER_BINARIES + 1))).toThrow(RangeError);
+  });
+
+  it("innerHeaderLength rechnet die Länge aus, ohne zu serialisieren", () => {
+    const header: InnerHeader = {
+      innerStreamId: "salsa20",
+      innerStreamKey: KEY,
+      binaries: [
+        { data: utf8Encode("erster"), protected: true },
+        { data: new Uint8Array(0), protected: false },
+      ],
+    };
+    expect(innerHeaderLength(header)).toBe(serializeInnerHeader(header).length);
+    expect(innerHeaderLength({ ...header, binaries: [] })).toBe(serializeInnerHeader({ ...header, binaries: [] }).length);
   });
 
   it("Anhänge sind Kopien, nicht Sichten auf den Klartext", () => {

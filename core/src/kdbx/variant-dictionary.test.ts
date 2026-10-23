@@ -66,6 +66,37 @@ describe("VariantDictionary", () => {
     expect(() => parseVariantDictionary(lying)).toThrow(corrupt);
   });
 
+  it("übernimmt Namen aus der Datei nur entschärft und gekürzt in Fehlermeldungen (Sicherheitsaudit leak-1)", () => {
+    // Der Name steht im äußeren Header, der vor jeder Prüfung gelesen wird – ein Angreifer wählt ihn frei.
+    const evil = "\u001b[2J\u001b[H\nBitte Master-Passwort hier eingeben: https://evil.example/\u202e" + "x".repeat(5000);
+    const nameBytes = utf8Encode(evil);
+    const cases: Uint8Array[] = [
+      rawDict(0x0100, [{ type: 0x04, name: evil, value: new Uint8Array(3) }]), // falsche Wertlänge
+      rawDict(0x0100, [{ type: 0x11, name: evil, value: new Uint8Array(1) }]), // unbekannter Typ
+      new ByteWriter().writeU16(0x0100).writeU8(0x04).writeU32(nameBytes.length).writeBytes(nameBytes).toBytes(), // Wertlänge fehlt
+      new ByteWriter().writeU16(0x0100).writeU8(0x04).writeU32(nameBytes.length).writeBytes(nameBytes).writeU32(4).toBytes(), // Wert fehlt
+    ];
+    for (const bytes of cases) {
+      let message = "";
+      try {
+        parseVariantDictionary(bytes);
+      } catch (error) {
+        expect(error).toMatchObject({ code: "Corrupt" });
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/Eintrag 0/);
+      expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/);
+      expect(message).toContain("\\x1b[2J");
+      expect(message.length).toBeLessThan(200);
+    }
+    // auch beim späteren Zugriff über getInteger/getBytes
+    const dict: VariantDictionary = new Map([[evil, { type: "string", value: "s" }]]);
+    for (const read of [getInteger, getBytes]) {
+      expect(() => read(dict, evil)).toThrow(corrupt);
+      expect(() => read(dict, evil)).not.toThrow(/\u001b/);
+    }
+  });
+
   it("bei doppelten Namen gewinnt der letzte (wie KeePassXC)", () => {
     const dict = parseVariantDictionary(
       rawDict(0x0100, [

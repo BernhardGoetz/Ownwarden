@@ -38,7 +38,7 @@ describe.skipIf(!hasKeepassxc())("Integration (e): Zusammenführen mit keepassxc
 
   beforeAll(async () => {
     dir = createTmpDir("interop-e");
-    const vault = createNewVault({ name: "Merge", now: Date.now(), kdf: TEST_KDF });
+    const vault = createNewVault({ name: "Merge", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     // Ohne Papierkorb ist `keepassxc-cli rm` sofort eine endgültige Löschung (mit DeletedObjects).
     vault.meta.recycleBinEnabled = false;
     const clock = createVaultClock(vault);

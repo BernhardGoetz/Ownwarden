@@ -89,13 +89,13 @@ async function rawFile(kdfBytes: Uint8Array, options: { badHash?: boolean } = {}
 describe("Gegenprobe: absurde KDF-Parameter", () => {
   it("Regression: zu großer Arbeitsaufwand (Speicher × Iterationen) wird abgelehnt", () => {
     // Alle diese Werte liegen innerhalb der Einzelgrenzen (Iterationen <= INT_MAX-1,
-    // Speicher <= 2 GiB), würden hash-wasm aber Stunden bis Jahre rechnen lassen – und
+    // Speicher <= 1 GiB), würden hash-wasm aber Stunden bis Jahre rechnen lassen – und
     // hash-wasm blockiert dabei den ganzen Thread (Service Worker eingefroren).
     const absurd = [
       argon2({ memoryBytes: 8 * 1024, parallelism: 1, iterations: KDF_LIMITS.maxRounds }),
       argon2({ memoryBytes: 1024 ** 3, iterations: 1000 }),
       argon2({ memoryBytes: 64 * 1024 ** 2, iterations: 100_000 }),
-      argon2({ type: "argon2d", memoryBytes: 2 * 1024 ** 3 - 1024 * 1024, iterations: 64 }),
+      argon2({ type: "argon2d", memoryBytes: 1024 ** 3, iterations: 64 }),
     ];
     for (const params of absurd) {
       expect(() => validateKdfParams(params), `M=${params.memoryBytes} I=${params.iterations}`).toThrow(

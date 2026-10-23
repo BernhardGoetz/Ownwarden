@@ -49,7 +49,7 @@ describe.skipIf(!hasKeepassxc())("Gegenprobe (d): Anhänge, Verschieben und Pass
 
   beforeAll(async () => {
     dir = createTmpDir("interop-d2");
-    const vault = createNewVault({ name: "Extern2", now: Date.now(), kdf: TEST_KDF });
+    const vault = createNewVault({ name: "Extern2", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const clock = createVaultClock(vault);
     uuids.archiv = createGroup(vault, vault.root.uuid, "Archiv", clock).uuid;
     uuids.mail = createEntry(vault, vault.root.uuid, { Title: "Mail", UserName: "alice", Password: "mail-pw" }, clock).uuid;

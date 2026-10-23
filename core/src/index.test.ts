@@ -39,7 +39,7 @@ describe("öffentliche Schnittstelle", () => {
     const storage = new api.InMemoryStorage();
     const options = { now: () => Date.now(), merge: api.mergeVaults, ...api.DEFAULT_SYNC_SETTINGS };
 
-    const vault = api.createNewVault({ name: "Api", now: Date.now(), kdf: TEST_KDF });
+    const vault = api.createNewVault({ name: "Api", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
     const entry = api.createEntry(vault, vault.root.uuid, { Title: "Mail", UserName: "alice", Password: "alt" }, api.createVaultClock(vault));
     const created = await api.syncVault(vault, new api.InMemoryAdapter({ storage, name: "Vivaldi" }), codec, options);
     expect(created.created).toBe(true);

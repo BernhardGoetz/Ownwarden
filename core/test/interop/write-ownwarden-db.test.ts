@@ -52,7 +52,7 @@ interface Built {
 }
 
 function buildVault(): Built {
-  const vault = createNewVault({ name: "Ownwarden-Interop", now: Date.now(), kdf: TEST_KDF });
+  const vault = createNewVault({ name: "Ownwarden-Interop", now: Date.now(), kdf: TEST_KDF, allowWeakKdf: true });
   const clock = createVaultClock(vault);
   const bank = createGroup(vault, vault.root.uuid, "Bank", clock);
   const archive = createGroup(vault, vault.root.uuid, "Archiv", clock);

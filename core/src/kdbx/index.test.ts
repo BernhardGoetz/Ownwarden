@@ -29,7 +29,7 @@ function content(vault: Vault): Omit<Vault, "settings"> {
 const comparable = (vault: Vault) => canonicalVault(vault);
 
 function sampleVault(): Vault {
-  const vault = createNewVault({ name: "Testtresor", now: NOW, kdf: TEST_KDF });
+  const vault = createNewVault({ name: "Testtresor", now: NOW, kdf: TEST_KDF, allowWeakKdf: true });
   const clock = createVaultClock(vault, () => NOW + 5000);
   const group = createGroup(vault, vault.root.uuid, "Bank", clock);
   const entry = createEntry(vault, group.uuid, { Title: "Giro", UserName: "bob", Password: "geheim", PIN: { value: "1234", protected: true } }, clock);
@@ -67,8 +67,23 @@ describe("createNewVault", () => {
   });
 
   it("übernimmt eine eigene Schlüsselableitung, lehnt ungültige ab", () => {
-    expect(createNewVault({ name: "x", now: NOW, kdf: TEST_KDF }).settings.kdf).toEqual(TEST_KDF);
-    expect(() => createNewVault({ name: "x", now: NOW, kdf: { ...TEST_KDF, memoryBytes: 1 } })).toThrow(KdbxError);
+    expect(createNewVault({ name: "x", now: NOW, kdf: TEST_KDF, allowWeakKdf: true }).settings.kdf).toEqual(TEST_KDF);
+    expect(() => createNewVault({ name: "x", now: NOW, kdf: { ...TEST_KDF, memoryBytes: 1 }, allowWeakKdf: true })).toThrow(KdbxError);
+  });
+
+  it("lehnt eine Schlüsselableitung unter der Mindeststärke ab, außer ausdrücklich erlaubt (Sicherheitsaudit crypto-2)", () => {
+    const weak: KdfParams[] = [
+      TEST_KDF,
+      { type: "aes", seed: new Uint8Array(32), rounds: 1 },
+      { ...TEST_KDF, memoryBytes: 8 * 1024, iterations: 1 },
+    ];
+    for (const kdf of weak) {
+      expect(() => createNewVault({ name: "x", now: NOW, kdf }), kdf.type).toThrow(RangeError);
+      expect(() => createNewVault({ name: "x", now: NOW, kdf }), kdf.type).toThrow(/Mindeststärke/);
+      expect(createNewVault({ name: "x", now: NOW, kdf, allowWeakKdf: true }).settings.kdf).toBe(kdf);
+    }
+    const owaspMinimum: KdfParams = { ...TEST_KDF, memoryBytes: 19 * 1024 * 1024, iterations: 2 };
+    expect(createNewVault({ name: "x", now: NOW, kdf: owaspMinimum }).settings.kdf).toBe(owaspMinimum);
   });
 
   // Review kdbx-2 (Entscheidung 2026-10-17: ablehnen, nie still verändern). Der Name landet in
@@ -76,9 +91,9 @@ describe("createNewVault", () => {
   // die Datenbank im Speicher von der Datei ab, und jeder Abgleich schriebe erneut (mit Sicherung).
   it("lehnt einen Namen mit Zeichen ab, die KDBX nicht speichern kann", () => {
     for (const name of ["Tresor\u000Bneu", "a\u0000", "￾", "x\uD800"]) {
-      expect(() => createNewVault({ name, now: NOW, kdf: TEST_KDF }), JSON.stringify(name)).toThrow(RangeError);
+      expect(() => createNewVault({ name, now: NOW, kdf: TEST_KDF, allowWeakKdf: true }), JSON.stringify(name)).toThrow(RangeError);
     }
-    expect(createNewVault({ name: "Tab\tZeile\nEmoji 🔑", now: NOW, kdf: TEST_KDF }).meta.databaseName).toBe("Tab\tZeile\nEmoji 🔑");
+    expect(createNewVault({ name: "Tab\tZeile\nEmoji 🔑", now: NOW, kdf: TEST_KDF, allowWeakKdf: true }).meta.databaseName).toBe("Tab\tZeile\nEmoji 🔑");
   });
 });
 
@@ -96,7 +111,7 @@ describe("readKdbx / writeKdbx", () => {
   });
 
   it("neue Datenbank ohne Inhalt: Rundreise ohne Unterschied (Zeiten sind schon ganze Sekunden)", async () => {
-    const vault = createNewVault({ name: "Leer", now: NOW, kdf: TEST_KDF });
+    const vault = createNewVault({ name: "Leer", now: NOW, kdf: TEST_KDF, allowWeakKdf: true });
     expect(content(await readKdbx(await writeKdbx(vault, CREDENTIALS), CREDENTIALS))).toEqual(content(vault));
   });
 

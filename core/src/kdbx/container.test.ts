@@ -4,6 +4,7 @@ import type { DecryptedPayload } from "../contracts";
 import type { CipherId, KdbxSettings, KdfParams } from "../model";
 import { utf8Encode } from "./bytes";
 import { gunzip, gzip } from "./compression";
+import { MAX_PAYLOAD_BYTES, MAX_XML_BYTES } from "./constants";
 import { decryptContainer, defaultKdbxSettings, encryptContainer } from "./container";
 import { aesCbcDecrypt } from "./crypto";
 import { parseOuterHeader } from "./header";
@@ -176,7 +177,79 @@ describe("Container: Beschädigung", () => {
   });
 });
 
+describe("Container: Größengrenzen beim Schreiben (Sicherheitsaudit crypto-3)", () => {
+  const MiB = 1024 * 1024;
+  /** 257 Anhänge, die sich EINEN 1-MiB-Puffer teilen: zusammen über MAX_PAYLOAD_BYTES, ohne 257 MiB zu belegen. */
+  const oversized = (compression: boolean): DecryptedPayload => {
+    const shared = new Uint8Array(MiB);
+    return { ...payload({ compression }), binaries: Array.from({ length: 257 }, () => ({ data: shared, protected: false })) };
+  };
+
+  it.each([false, true])("lehnt Inhalt über 256 MiB ab, den readKdbx nicht mehr öffnen würde (gzip=%s)", async (compression) => {
+    expect(MAX_PAYLOAD_BYTES).toBe(256 * MiB);
+    // Die Prüfung kommt vor der (hier ~85 s teuren) KDF.
+    const expensiveKdf: KdfParams = { type: "aes", seed: new Uint8Array(32), rounds: 0x7fffffff - 1 };
+    const big = oversized(compression);
+    const start = performance.now();
+    // (bei Erfolg nicht die riesige Datei ins Testergebnis übernehmen)
+    const error = await encryptContainer({ ...big, settings: { ...big.settings, kdf: expensiveKdf } }, PASSWORD).then(
+      () => "kein Fehler",
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toMatch(/257,0 MiB.*höchstens 256 MiB/);
+    expect(performance.now() - start).toBeLessThan(5000);
+  });
+
+  it("lehnt eine XML-Datenbank über MAX_XML_BYTES ab, nimmt genau MAX_XML_BYTES an", async () => {
+    const xml = (length: number) => {
+      const bytes = new Uint8Array(length).fill(0x20);
+      bytes.set(utf8Encode("<KeePassFile>"), 0);
+      return bytes;
+    };
+    const error = await encryptContainer({ ...payload({ compression: false }), xml: xml(MAX_XML_BYTES + 1) }, PASSWORD).then(
+      () => "kein Fehler",
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toMatch(/XML-Datenbank.*16,0 MiB.*höchstens 16 MiB/);
+    const atLimit = await encryptContainer({ ...payload({ compression: false }), xml: xml(MAX_XML_BYTES) }, PASSWORD);
+    expect((await decryptContainer(atLimit, PASSWORD)).xml.length).toBe(MAX_XML_BYTES);
+  });
+});
+
+describe("Container: Reihenfolge der Prüfungen (Sicherheitsaudit crypto-1)", () => {
+  it("ein beschädigter Header mit unzulässigen KDF-Werten heißt „beschädigt“, nicht „Einstellungen ändern“", async () => {
+    const file = await encryptContainer(payload({ kdf: FAST_ARGON2ID }), PASSWORD);
+    const { headerBytes } = parseOuterHeader(file);
+    // Iterationen (uint64 in den KDF-Parametern) auf 2^40 setzen, die Header-SHA-256 aber NICHT anpassen
+    const kdfStart = Buffer.from(headerBytes).indexOf(Buffer.from([0x05, 0x01, 0x00, 0x00, 0x00, 0x49, 0x08, 0x00, 0x00, 0x00]));
+    expect(kdfStart).toBeGreaterThan(0);
+    const damaged = file.slice();
+    damaged[kdfStart + 10 + 5] = 0x01;
+    await expect(decryptContainer(damaged, PASSWORD)).rejects.toThrow(code("Corrupt"));
+    await expect(decryptContainer(damaged, PASSWORD)).rejects.toThrow(/SHA-256/);
+  });
+});
+
 describe("Kompression und AES-Hilfen", () => {
+  it("entpackt höchstens MAX_PAYLOAD_BYTES = 256 MiB (Sicherheitsaudit dos-4)", async () => {
+    expect(MAX_PAYLOAD_BYTES).toBe(256 * 1024 * 1024);
+    // 256 MiB + 1 Byte Nullen packen, ohne sie am Stück zu belegen
+    const chunk = new Uint8Array(1024 * 1024);
+    let left = MAX_PAYLOAD_BYTES + 1;
+    const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      pull(controller) {
+        if (left === 0) return controller.close();
+        const length = Math.min(left, chunk.length);
+        left -= length;
+        controller.enqueue(chunk.slice(0, length));
+      },
+    });
+    const packed = new Uint8Array(await new Response(source.pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+    await expect(gunzip(packed)).rejects.toThrow(code("Corrupt"));
+  });
+
   it("GZip-Rundreise und Größenbremse beim Entpacken", async () => {
     const data = new Uint8Array(1024 * 1024);
     const packed = await gzip(data);
