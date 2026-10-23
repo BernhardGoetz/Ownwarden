@@ -15,8 +15,9 @@ export async function gzip(data: Uint8Array): Promise<Uint8Array> {
 }
 
 /**
- * Entpackt GZip-Daten. Wirft KdbxError("Corrupt"), wenn die Daten kein gültiges GZip sind
- * oder entpackt größer als `maxBytes` würden.
+ * Entpackt GZip-Daten. Wirft KdbxError("Corrupt"), wenn die Daten kein gültiges GZip sind, und
+ * KdbxError("TooLarge"), wenn sie entpackt größer als `maxBytes` würden (die Datei ist dann
+ * gültig, aber zu groß für Ownwarden).
  */
 export async function gunzip(data: Uint8Array, maxBytes = MAX_PAYLOAD_BYTES): Promise<Uint8Array> {
   const stream = new Blob([asBufferSource(data)]).stream().pipeThrough(new DecompressionStream("gzip"));
@@ -30,7 +31,7 @@ export async function gunzip(data: Uint8Array, maxBytes = MAX_PAYLOAD_BYTES): Pr
       total += value.length;
       if (total > maxBytes) {
         await reader.cancel();
-        throw new KdbxError("Corrupt", "Entpackter Inhalt ist unplausibel groß.");
+        throw new KdbxError("TooLarge", `Entpackter Inhalt zu groß für Ownwarden (mehr als ${sizeText(maxBytes)}).`);
       }
       chunks.push(value);
     }
@@ -39,4 +40,9 @@ export async function gunzip(data: Uint8Array, maxBytes = MAX_PAYLOAD_BYTES): Pr
     throw new KdbxError("Corrupt", `GZip-Daten sind beschädigt: ${(error as Error).message}`);
   }
   return concatByteArrays(chunks);
+}
+
+/** Größe für Meldungen: "256 MiB" oder "1000 Byte". */
+function sizeText(bytes: number): string {
+  return bytes % (1024 * 1024) === 0 ? `${bytes / (1024 * 1024)} MiB` : `${bytes} Byte`;
 }

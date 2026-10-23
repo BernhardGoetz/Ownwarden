@@ -14,7 +14,12 @@
  * gleich. Wir prüfen jede Länge gegen die tatsächlich vorhandenen Bytes.
  */
 import { displayText } from "../display-text";
-import { VARIANT_DICTIONARY_CRITICAL_MASK, VARIANT_DICTIONARY_VERSION } from "./constants";
+import {
+  MAX_OUTER_HEADER_BYTES,
+  MAX_VARIANT_DICTIONARY_ENTRIES,
+  VARIANT_DICTIONARY_CRITICAL_MASK,
+  VARIANT_DICTIONARY_VERSION,
+} from "./constants";
 import { ByteReader, ByteWriter, corrupt, utf8Decode, utf8Encode } from "./bytes";
 
 /** Typ-Bytes im VariantDictionary (KeePass2::VariantMapFieldType). */
@@ -48,8 +53,14 @@ const CONTEXT = "VariantDictionary";
  * Liest ein VariantDictionary. Wirft KdbxError("Corrupt") bei jedem Formatfehler.
  * Kommt ein Name doppelt vor, gewinnt – wie bei KeePassXC – der letzte.
  * Bytes nach dem Ende-Zeichen werden – ebenfalls wie bei KeePassXC – ignoriert.
+ *
+ * Grenzen (Sicherheitsaudit dos-1, Nachprüfung): Ein VariantDictionary steht immer im äußeren
+ * Header und darf daher nicht größer sein als dieser (MAX_OUTER_HEADER_BYTES) – damit auch kein
+ * einzelner Name oder Wert. Und höchstens MAX_VARIANT_DICTIONARY_ENTRIES Einträge. Corrupt wie
+ * beim Header (siehe header.ts, requireHeaderLimit).
  */
 export function parseVariantDictionary(bytes: Uint8Array): VariantDictionary {
+  if (bytes.length > MAX_OUTER_HEADER_BYTES) corrupt(`${CONTEXT}: unplausibel groß (mehr als ${MAX_OUTER_HEADER_BYTES / 1024} KiB).`);
   const reader = new ByteReader(bytes, CONTEXT);
   const version = reader.readU16("Version");
   if ((version & VARIANT_DICTIONARY_CRITICAL_MASK) > (VARIANT_DICTIONARY_VERSION & VARIANT_DICTIONARY_CRITICAL_MASK)) {
@@ -60,6 +71,7 @@ export function parseVariantDictionary(bytes: Uint8Array): VariantDictionary {
   for (let index = 0; ; index++) {
     const type = reader.readU8("Typ (fehlendes Ende-Zeichen?)");
     if (type === VariantType.End) return dict;
+    if (index === MAX_VARIANT_DICTIONARY_ENTRIES) corrupt(`${CONTEXT}: mehr als ${MAX_VARIANT_DICTIONARY_ENTRIES} Einträge.`);
 
     const nameLength = reader.readU32(`Namenslänge von Eintrag ${index}`);
     const name = utf8Decode(reader.readView(nameLength, `Name von Eintrag ${index}`));

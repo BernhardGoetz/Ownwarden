@@ -15,6 +15,7 @@
  *
  * Abgeglichen mit KeePassXC 2.7.6: src/streams/HmacBlockStream.cpp.
  */
+import { KdbxError } from "../contracts";
 import { ByteReader, ByteWriter, bytesEqual, concatByteArrays, corrupt, u64le, wipe } from "./bytes";
 import { HMAC_BLOCK_SIZE, MAX_PAYLOAD_BYTES } from "./constants";
 import { hmacSha256, sha512 } from "./crypto";
@@ -42,8 +43,13 @@ async function blockHmac(index: bigint, sizeBytes: Uint8Array, data: Uint8Array,
  * aneinandergehängt (= der verschlüsselte Inhalt). Wirft KdbxError("Corrupt"), wenn ein
  * HMAC nicht passt, eine Größe ungültig ist oder der abschließende leere Block fehlt
  * (abgeschnittene Datei). Bytes nach dem Endblock werden – wie bei KeePassXC – ignoriert.
+ * Mehr als `maxBytes` Inhalt: KdbxError("TooLarge"), die Blöcke bis dahin sind ja echt.
  */
-export async function readHmacBlockStream(stream: Uint8Array, hmacBaseKey: Uint8Array): Promise<Uint8Array> {
+export async function readHmacBlockStream(
+  stream: Uint8Array,
+  hmacBaseKey: Uint8Array,
+  maxBytes = MAX_PAYLOAD_BYTES,
+): Promise<Uint8Array> {
   const reader = new ByteReader(stream, "HMAC-Blockstrom");
   const blocks: Uint8Array[] = [];
   let total = 0;
@@ -63,10 +69,17 @@ export async function readHmacBlockStream(stream: Uint8Array, hmacBaseKey: Uint8
     if (size === 0) break;
 
     total += size;
-    if (total > MAX_PAYLOAD_BYTES) corrupt("HMAC-Blockstrom: Inhalt ist unplausibel groß.");
+    if (total > maxBytes) {
+      throw new KdbxError("TooLarge", `HMAC-Blockstrom: Inhalt zu groß für Ownwarden (mehr als ${sizeText(maxBytes)}).`);
+    }
     blocks.push(data);
   }
   return concatByteArrays(blocks);
+}
+
+/** Größe für Meldungen: "256 MiB" oder "1000 Byte". */
+function sizeText(bytes: number): string {
+  return bytes % (1024 * 1024) === 0 ? `${bytes / (1024 * 1024)} MiB` : `${bytes} Byte`;
 }
 
 /**

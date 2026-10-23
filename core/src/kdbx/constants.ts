@@ -54,6 +54,23 @@ export const LEGACY_HEADER_FIELDS: ReadonlySet<number> = new Set([
 /** Inhalt des End-Felds im äußeren Header; KeePassXC und KeePass schreiben "\r\n\r\n". */
 export const END_OF_HEADER_DATA = new Uint8Array([0x0d, 0x0a, 0x0d, 0x0a]);
 
+/**
+ * Obergrenze für den äußeren Header (Sicherheitsaudit dos-1, Nachprüfung). Er wird gelesen,
+ * BEVOR irgendein Schlüssel geprüft ist. Ohne Grenze reichte eine heruntergeladene Datei bis zur
+ * Obergrenze von read() (257 MiB, über WebDAV komprimiert nur wenige MiB) mit Millionen winziger
+ * Felder bzw. VariantDictionary-Einträge für Gigabytes an Speicher (gemessen: 64 MiB Header,
+ * über 1,5 GB) und viele Sekunden Rechenzeit. KeePassXC 2.7.6 und Ownwarden schreiben 200–260
+ * Byte (gemessen: 207 bzw. 253); 64 KiB lassen auch für öffentliche Zusatzdaten (Feld 12) viel Platz.
+ */
+export const MAX_OUTER_HEADER_BYTES = 64 * 1024;
+
+/**
+ * Höchstzahl der Einträge eines VariantDictionary (KDF-Parameter, öffentliche Zusatzdaten). Ein
+ * Eintrag belegt in der Datei ab 10 Byte, im Speicher ein Vielfaches davon. Die KDF-Parameter
+ * haben höchstens 8 Einträge; 1000 lassen Plugins (Feld 12) reichlich Platz.
+ */
+export const MAX_VARIANT_DICTIONARY_ENTRIES = 1000;
+
 /** IDs der Felder im inneren Header (am Anfang des entschlüsselten Inhalts). */
 export const InnerHeaderFieldId = {
   End: 0,
@@ -253,8 +270,15 @@ export const MAX_INNER_BINARIES = 100_000;
 
 /**
  * Obergrenze für das XML-Dokument (UTF-8-Byte), bevor es dem XML-Parser übergeben wird
- * (Sicherheitsaudit dos-4). Anhänge stehen nicht im XML, sondern im inneren Header; 16 MiB XML
- * entsprechen Zehntausenden Einträgen. Der DOM-Parser braucht ein Vielfaches davon an
- * Arbeitsspeicher, auf dem Handy und im Service Worker ist das die engere Grenze.
+ * (Sicherheitsaudit dos-4). Anhänge stehen nicht im XML, sondern im inneren Header. Der
+ * DOM-Parser braucht ein Vielfaches davon an Arbeitsspeicher, auf dem Handy und im Service
+ * Worker ist das die engere Grenze.
+ *
+ * 32 MiB (Nachprüfung; vorher 16 MiB): Eine KeePassXC-Datenbank mit 1500 Einträgen und je 10
+ * Verlaufsfassungen hat schon 23 MiB XML (gemessen mit KeePassXC 2.7.6, rund 1,5 KB je Fassung);
+ * 32 MiB reichen für etwa 2000 solcher Einträge. Preis (gemessen, Node 22, 2026-10): 2080 solche
+ * Einträge (31,8 MiB XML) brauchen beim Einlesen 8 s und rund 1,4 GB zusätzlichen Speicher; mit
+ * 1 GiB Heap scheitert das, mit 1,5 GiB nicht. Größere Dateien lehnt readKdbx mit KdbxError
+ * „TooLarge“ ab.
  */
-export const MAX_XML_BYTES = 16 * 1024 * 1024;
+export const MAX_XML_BYTES = 32 * 1024 * 1024;

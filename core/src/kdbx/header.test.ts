@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ByteWriter, toHex, uuidToBytes } from "./bytes";
-import { CIPHER_UUID, HeaderFieldId } from "./constants";
-import { parseOuterHeader, serializeOuterHeader, type OuterHeader } from "./header";
+import { CIPHER_UUID, HeaderFieldId, MAX_OUTER_HEADER_BYTES } from "./constants";
+import { decryptContainer } from "./container";
+import { outerHeaderLength, parseOuterHeader, serializeOuterHeader, type OuterHeader } from "./header";
 import { serializeKdfParameters } from "./kdf";
 import { serializeVariantDictionary } from "./variant-dictionary";
 
@@ -152,6 +153,60 @@ describe("Äußerer Header", () => {
       expect(message).toMatch(/^VariantDictionary: Eintrag 0/);
       expect(message).not.toMatch(/[\u0000-\u001f]/);
     }
+  });
+
+  it("lehnt einen äußeren Header über 64 KiB ab, ohne ihn zu Ende zu lesen (Sicherheitsaudit dos-1, Nachprüfung)", () => {
+    expect(MAX_OUTER_HEADER_BYTES).toBe(64 * 1024);
+    const base = rawHeader([...validFields(), END]).length;
+    const withCustomData = (headerLength: number) => {
+      // Ein Eintrag "S" mit Byte-Array: 13 Byte Verwaltung plus Wert
+      const dictLength = headerLength - base - 5;
+      const dict = serializeVariantDictionary(new Map([["S", { type: "bytes", value: new Uint8Array(dictLength - 13) }]]));
+      return rawHeader([...validFields(), [HeaderFieldId.PublicCustomData, dict], END]);
+    };
+    const atLimit = withCustomData(MAX_OUTER_HEADER_BYTES);
+    expect(atLimit.length).toBe(MAX_OUTER_HEADER_BYTES);
+    expect(outerHeaderLength(atLimit)).toBe(MAX_OUTER_HEADER_BYTES);
+    expect(parseOuterHeader(atLimit).header.publicCustomData).toHaveLength(MAX_OUTER_HEADER_BYTES - base - 5);
+    const overLimit = withCustomData(MAX_OUTER_HEADER_BYTES + 1);
+    for (const read of [outerHeaderLength, parseOuterHeader]) {
+      expect(() => read(overLimit)).toThrow(code("Corrupt"));
+      expect(() => read(overLimit)).toThrow("Äußerer Header: unplausibel lang (mehr als 64 KiB; echte Dateien haben wenige hundert Byte).");
+    }
+    // Millionen leerer Kommentarfelder (15 MiB): Abbruch nach 64 KiB statt alle Felder zu lesen
+    const start = rawHeader(validFields());
+    const end = rawHeader([END]).subarray(12);
+    const manyFields = new Uint8Array(start.length + 3_000_000 * 5 + end.length);
+    manyFields.set(start);
+    for (let i = start.length; i < manyFields.length - end.length; i += 5) manyFields[i] = HeaderFieldId.Comment;
+    manyFields.set(end, manyFields.length - end.length);
+    for (const read of [outerHeaderLength, parseOuterHeader]) {
+      expect(() => read(manyFields)).toThrow(/unplausibel lang/);
+    }
+  });
+
+  it("decryptContainer prüft die Header-Länge vor der Header-SHA-256 (Sicherheitsaudit dos-1, Nachprüfung)", async () => {
+    // Nachbau aus der Nachprüfung: öffentliche Zusatzdaten mit Millionen winziger Einträge
+    // (1 MiB, ~75 000 Einträge; im Angriff bis 257 MiB, über WebDAV stark komprimiert).
+    const dict = new ByteWriter().writeU16(0x0100);
+    for (let i = 0; dict.byteLength < 1024 * 1024; i++) {
+      const name = i.toString(36);
+      dict.writeU8(0x42).writeU32(name.length).writeBytes(new TextEncoder().encode(name)).writeU32(0);
+    }
+    const header = rawHeader([...validFields(), [HeaderFieldId.PublicCustomData, dict.writeU8(0).toBytes()], END]);
+    const file = new Uint8Array(header.length + 64); // SHA-256 und HMAC: Nullen
+    file.set(header);
+    await expect(decryptContainer(file, { password: "egal" })).rejects.toThrow(code("Corrupt"));
+    await expect(decryptContainer(file, { password: "egal" })).rejects.toThrow(/unplausibel lang/);
+  });
+
+  it("schreibt keinen äußeren Header, den das Lesen ablehnt (Sicherheitsaudit dos-1, Nachprüfung)", () => {
+    const customData = (valueLength: number) =>
+      serializeVariantDictionary(new Map([["S", { type: "bytes", value: new Uint8Array(valueLength) }]]));
+    expect(() => serializeOuterHeader(sampleHeader({ publicCustomData: customData(MAX_OUTER_HEADER_BYTES - 300) }))).not.toThrow();
+    // Das VariantDictionary allein passt, der ganze Header aber nicht mehr
+    expect(() => serializeOuterHeader(sampleHeader({ publicCustomData: customData(MAX_OUTER_HEADER_BYTES - 100) }))).toThrow(RangeError);
+    expect(() => serializeOuterHeader(sampleHeader({ publicCustomData: customData(MAX_OUTER_HEADER_BYTES - 100) }))).toThrow(/64 KiB/);
   });
 
   it("schreibt nur unterstützte Einstellungen", () => {

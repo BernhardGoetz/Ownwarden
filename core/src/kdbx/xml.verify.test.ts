@@ -11,9 +11,10 @@ import { NULL_UUID, type Entry, type Group, type KdbxSettings, type Vault } from
 import { utf8Decode, utf8Encode } from "./bytes";
 import { MAX_XML_BYTES } from "./constants";
 import { kdbxMinorVersionRequired, parseVaultXml, serializeVaultXml } from "./xml";
-import { MAX_XML_DEPTH } from "./xml-dom";
+import { KDBX_XML_LIMITS, MAX_XML_DEPTH, MAX_XML_NODES, findXmlLimitViolation } from "./xml-dom";
 
 const corrupt = expect.objectContaining({ name: "KdbxError", code: "Corrupt" });
+const tooLarge = expect.objectContaining({ name: "KdbxError", code: "TooLarge" });
 
 const SETTINGS_41: KdbxSettings = {
   versionMinor: 1,
@@ -547,9 +548,28 @@ describe("Namensräume gibt es in KDBX nicht (Sicherheitsaudit xml-4, xml-5)", (
 
 describe("Größe der XML-Datenbank (Sicherheitsaudit dos-4)", () => {
   it("lehnt mehr als MAX_XML_BYTES ab, bevor die Bytes dekodiert und eingelesen werden", () => {
+    // Nachprüfung: 32 statt 16 MiB (KeePassXC: 1500 Einträge × 11 Fassungen ≈ 23 MiB) und
+    // TooLarge („zu groß für Ownwarden“) statt Corrupt („beschädigt“)
+    expect(MAX_XML_BYTES).toBe(32 * 1024 * 1024);
     const bytes = new Uint8Array(MAX_XML_BYTES + 1).fill(0x20);
-    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow(corrupt);
-    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow(/XML-Datenbank: XML ist zu groß \(mehr als 16 MiB\)/);
+    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow(tooLarge);
+    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow("XML-Datenbank: zu groß für Ownwarden – die XML hat mehr als 32 MiB.");
+  });
+
+  it("echte Datenbanken stoßen zuerst an MAX_XML_BYTES, nicht an MAX_XML_NODES (Sicherheitsaudit dos-4, Nachprüfung)", () => {
+    // Die dichteste übliche Form: Einträge mit leeren Standardfeldern und Verlauf (gemessen 29 Byte
+    // je Bestandteil; KeePassXC schreibt 30–42). Hätte eine so dichte Datei mit MAX_XML_BYTES
+    // mehr als MAX_XML_NODES Bestandteile, griffe die Bestandteil-Grenze zuerst.
+    const empty = () =>
+      new Map(["Title", "UserName", "Password", "URL", "Notes"].map((key) => [key, { value: "", protected: key === "Password" }]));
+    const entries = Array.from({ length: 150 }, (_, i) =>
+      minimalEntry(100 + i, { strings: empty(), history: [minimalEntry(100 + i, { strings: empty() }), minimalEntry(100 + i, { strings: empty() })] }),
+    );
+    const vault = sampleVault(true);
+    vault.root.entries.push(...entries);
+    const text = utf8Decode(serializeVaultXml(vault, identityStream()).xml);
+    const nodesAtSameDensity = Math.floor((text.length * MAX_XML_NODES) / MAX_XML_BYTES);
+    expect(findXmlLimitViolation(text, { ...KDBX_XML_LIMITS, maxLength: Infinity, maxNodes: nodesAtSameDensity })).toBeUndefined();
   });
 
   it("liest eine Datei, die genau MAX_XML_BYTES groß ist", () => {
@@ -557,5 +577,52 @@ describe("Größe der XML-Datenbank (Sicherheitsaudit dos-4)", () => {
     const bytes = new Uint8Array(MAX_XML_BYTES).fill(0x20);
     bytes.set(small);
     expect(parseVaultXml(bytes, [], identityStream(), SETTINGS_41).root.name).toBe("Root");
+  });
+});
+
+describe("Fremder Text in Meldungen (Sicherheitsaudit leak-1)", () => {
+  // Feldnamen, Anhangsnamen und CustomData-Schlüssel dürfen in XML fast alles enthalten:
+  // Zeilenumbrüche, C1-Steuerzeichen (U+009B = CSI im Terminal), Bidi-Zeichen, Megabytes.
+  const evil = "\n\u009b2J\u202eFALSCH: Bitte Master-Passwort eingeben\u2028" + "x".repeat(5000);
+  const entry = (inner: string) => `<Entry><UUID>${testUuid(40)}</UUID>${inner}</Entry>`;
+  const binaries: PoolBinary[] = [
+    { data: utf8Encode("eins"), protected: false },
+    { data: utf8Encode("zwei"), protected: false },
+  ];
+  const notUtf8 = Buffer.from([0xff, 0xfe]).toString("base64");
+  it.each([
+    ["doppeltes Feld", entry(`<String><Key>${evil}</Key><Value>a</Value></String><String><Key>${evil}</Key><Value>b</Value></String>`)],
+    ["Feldwert kein UTF-8", entry(`<String><Key>${evil}</Key><Value Protected="True">${notUtf8}</Value></String>`)],
+    ["Anhang doppelt", entry(`<Binary><Key>${evil}</Key><Value Ref="0"/></Binary><Binary><Key>${evil}</Key><Value Ref="1"/></Binary>`)],
+    ["Anhang ohne Pool-Eintrag", entry(`<Binary><Key>${evil}</Key><Value Ref="7"/></Binary>`)],
+    ["CustomData-Wert mit Element", `<CustomData><Item><Key>${evil}</Key><Value><x/></Value></Item></CustomData>`],
+    ["CustomData-Zeit kaputt", `<CustomData><Item><Key>${evil}</Key><Value>v</Value><LastModificationTime>kaputt</LastModificationTime></Item></CustomData>`],
+  ])("%s: Name nur entschärft und gekürzt (Sicherheitsaudit leak-1)", (_name, group) => {
+    let message = "";
+    try {
+      parse(doc({ group }), binaries);
+    } catch (error) {
+      expect(error).toMatchObject({ code: "Corrupt" });
+      message = (error as Error).message;
+    }
+    expect(message).toContain("\\x0a\\x9b2J\\u202eFALSCH");
+    expect(message).not.toMatch(/[\n\u0080-\u009f\u202a-\u202e\u2028\u2029]/);
+    expect(message.length).toBeLessThan(400);
+  });
+
+  it("Name des Wurzelelements und eines unbekannten geschützten Elements nur gekürzt (Sicherheitsaudit leak-1)", () => {
+    const long = "W".repeat(100_000);
+    const notUtf8Unknown = doc({ group: `<${long} Protected="True">${notUtf8}</${long}>` });
+    for (const xml of [`<${long}/>`, notUtf8Unknown]) {
+      let message = "";
+      try {
+        parse(xml);
+      } catch (error) {
+        expect(error).toMatchObject({ code: "Corrupt" });
+        message = (error as Error).message;
+      }
+      expect(message).toContain("WWW…");
+      expect(message.length).toBeLessThan(400);
+    }
   });
 });

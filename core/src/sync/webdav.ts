@@ -21,6 +21,10 @@
  *     Antwort darf höchstens timeoutMs plus die Zeit dauern, die die schon angekommenen Byte bei
  *     MIN_DOWNLOAD_BYTES_PER_SECOND brauchen. Ein Server, der kurz vor jedem Zeitlimit ein Byte
  *     schickt, hält eine Übertragung so nicht beliebig lange offen.
+ *     Zusätzlich gilt eine feste Obergrenze je Anfrage samt Lesen der Antwort (maxRequestMs,
+ *     Standard MAX_REQUEST_MS = 30 min), beim Lesen ohne ETag-Header für alle Anfragen zusammen
+ *     (Sicherheitsaudit dos-5, Nachprüfung). Gemessen wird mit performance.now(): Stellt jemand
+ *     die Geräteuhr, verlängert das keine Frist.
  *     Achtung Service Worker: Chrome beendet ihn, wenn eine Antwort länger als 30 s braucht.
  *     Das Zeitlimit gegen Stillstand bleibt darunter (DEFAULT_WEBDAV_TIMEOUT_MS), aber ein
  *     großer Upload auf langsamer Leitung kann trotzdem länger dauern; dann bricht der Abgleich
@@ -96,6 +100,14 @@ export const MIN_UPLOAD_BYTES_PER_SECOND = 16 * 1024;
 export const MIN_DOWNLOAD_BYTES_PER_SECOND = MIN_UPLOAD_BYTES_PER_SECOND;
 
 /**
+ * Feste Obergrenze für eine Anfrage samt Lesen der Antwort (Sicherheitsaudit dos-5,
+ * Nachprüfung): Die Mindestrate allein erlaubte für die größte Tresor-Datei (MAX_VAULT_FILE_BYTES
+ * bei 16 KiB/s) über 4 Stunden. 30 Minuten reichen für 256 MiB ab etwa 1,2 Mbit/s und bei der
+ * Mindestrate für etwa 28 MiB – in beide Richtungen, auch beim Hochladen.
+ */
+export const MAX_REQUEST_MS = 30 * 60 * 1000;
+
+/**
  * Obergrenze für die gelesene Tresor-Datei (Sicherheitsaudit dos-1): der größte Inhalt, den
  * readKdbx annimmt (MAX_PAYLOAD_BYTES), plus 1 MiB für Header und Blockstruktur. Ohne Grenze
  * könnte ein Server den Speicher füllen, bevor irgendein Schlüssel geprüft ist.
@@ -127,6 +139,11 @@ export interface WebDavAdapterOptions {
   timeoutMs?: number;
   /** Mindestrate beim Herunterladen in Byte/s (siehe Kopfkommentar); Standard MIN_DOWNLOAD_BYTES_PER_SECOND. */
   minDownloadBytesPerSecond?: number;
+  /**
+   * Feste Obergrenze je Anfrage samt Lesen der Antwort in ms (siehe Kopfkommentar); beim Lesen
+   * ohne ETag-Header für alle Anfragen zusammen. Standard MAX_REQUEST_MS.
+   */
+  maxRequestMs?: number;
   /** Höchstens so viele Byte liest read() von der Tresor-Datei; Standard MAX_VAULT_FILE_BYTES. */
   maxFileBytes?: number;
   /** Höchstens so viele Byte einer PROPFIND-Antwort; Standard MAX_PROPFIND_BYTES. */
@@ -161,6 +178,7 @@ export class WebDavAdapter implements StorageAdapter {
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
   private readonly minDownloadBytesPerSecond: number;
+  private readonly maxRequestMs: number;
   private readonly maxFileBytes: number;
   private readonly maxPropfindBytes: number;
   private readonly now: () => Millis;
@@ -191,6 +209,7 @@ export class WebDavAdapter implements StorageAdapter {
 
     this.timeoutMs = positiveNumber(options.timeoutMs ?? DEFAULT_WEBDAV_TIMEOUT_MS, "timeoutMs");
     this.minDownloadBytesPerSecond = positiveNumber(options.minDownloadBytesPerSecond ?? MIN_DOWNLOAD_BYTES_PER_SECOND, "minDownloadBytesPerSecond");
+    this.maxRequestMs = positiveNumber(options.maxRequestMs ?? MAX_REQUEST_MS, "maxRequestMs");
     this.maxFileBytes = positiveNumber(options.maxFileBytes ?? MAX_VAULT_FILE_BYTES, "maxFileBytes");
     this.maxPropfindBytes = positiveNumber(options.maxPropfindBytes ?? MAX_PROPFIND_BYTES, "maxPropfindBytes");
     this.now = options.now ?? (() => Date.now());
@@ -227,14 +246,18 @@ export class WebDavAdapter implements StorageAdapter {
    * nächste bedingte Schreiben würde dann die Änderung eines anderen Geräts überschreiben.
    *
    * Kennt der Server gar keinen ETag, ist etag "" (syncVault schreibt dann nicht).
+   *
+   * Alle Anfragen zusammen dürfen höchstens maxRequestMs dauern (Sicherheitsaudit dos-5,
+   * Nachprüfung), sonst wären es bis zu neunmal so viel.
    */
   private async readWithEtagFromPropfind(): Promise<RemoteFile | null> {
+    const until = performance.now() + this.maxRequestMs;
     for (let attempt = 0; attempt < ETAG_FALLBACK_ATTEMPTS; attempt++) {
-      const before = await this.propfindEtag();
+      const before = await this.propfindEtag(until);
       if (before === undefined) return null; // inzwischen gelöscht
 
       const headers: Record<string, string> = before === null ? {} : { "If-Match": before };
-      const response = await this.send("GET", this.fileUrl, headers);
+      const response = await this.send("GET", this.fileUrl, headers, undefined, until);
       if (response.status === 404) {
         await this.discard(response);
         return null;
@@ -247,15 +270,18 @@ export class WebDavAdapter implements StorageAdapter {
       const data = await this.readBytes(response, this.fileUrl, this.maxFileBytes);
       if (before === null) return remoteFile(data, "", response);
 
-      const after = await this.propfindEtag();
+      const after = await this.propfindEtag(until);
       if (after === before) return remoteFile(data, before, response);
     }
     throw new StorageError("Die Tresor-Datei wurde während des Lesens mehrfach geändert. Bitte später erneut synchronisieren.");
   }
 
-  /** ETag der Datei per PROPFIND (Depth 0): Wert, null (Server nennt keinen) oder undefined (Datei fehlt). */
-  private async propfindEtag(): Promise<string | null | undefined> {
-    const resources = await this.propfind(this.fileUrl, "0");
+  /**
+   * ETag der Datei per PROPFIND (Depth 0): Wert, null (Server nennt keinen) oder undefined (Datei fehlt).
+   * `until`: Zeitpunkt (performance.now()), bis zu dem die Anfrage spätestens fertig sein muss.
+   */
+  private async propfindEtag(until: number): Promise<string | null | undefined> {
+    const resources = await this.propfind(this.fileUrl, "0", until);
     if (resources === null) return undefined;
     const etag = resources.find((resource) => !resource.isCollection)?.props.get("getetag");
     return etag === undefined || etag === "" ? null : etag;
@@ -475,9 +501,9 @@ export class WebDavAdapter implements StorageAdapter {
   // HTTP
   // -------------------------------------------------------------------------
 
-  /** PROPFIND mit `depth`; null bei 404. */
-  private async propfind(url: URL, depth: "0" | "1"): Promise<DavResource[] | null> {
-    const response = await this.send("PROPFIND", url, { Depth: depth, "Content-Type": "application/xml; charset=utf-8" }, PROPFIND_BODY);
+  /** PROPFIND mit `depth`; null bei 404. `until` wie bei send. */
+  private async propfind(url: URL, depth: "0" | "1", until = Infinity): Promise<DavResource[] | null> {
+    const response = await this.send("PROPFIND", url, { Depth: depth, "Content-Type": "application/xml; charset=utf-8" }, PROPFIND_BODY, until);
     if (response.status === 404) {
       await this.discard(response);
       return null;
@@ -507,9 +533,16 @@ export class WebDavAdapter implements StorageAdapter {
    * der Inhalt `body` bei MIN_UPLOAD_BYTES_PER_SECOND zum Hochladen braucht. Danach läuft die
    * Frist weiter, bis der Körper gelesen (readBytes) oder verworfen (discard) ist; jedes beim
    * Lesen ankommende Stück verlängert sie wieder um timeoutMs, höchstens bis zur Gesamtfrist
-   * aus MIN_DOWNLOAD_BYTES_PER_SECOND.
+   * aus MIN_DOWNLOAD_BYTES_PER_SECOND. Nie länger als maxRequestMs ab jetzt und nie über `until`
+   * (performance.now(); Gesamtgrenze beim Lesen ohne ETag) hinaus.
    */
-  private async send(method: string, url: URL, headers: Record<string, string> = {}, body?: RequestBody): Promise<Response> {
+  private async send(
+    method: string,
+    url: URL,
+    headers: Record<string, string> = {},
+    body?: RequestBody,
+    until = Infinity,
+  ): Promise<Response> {
     const allHeaders = new Headers(headers);
     const destination = allHeaders.get("Destination");
     if (url.origin !== this.fileUrl.origin || (destination !== null && !isSameOrigin(destination, this.fileUrl))) {
@@ -519,7 +552,13 @@ export class WebDavAdapter implements StorageAdapter {
     // Text-Körper sind nur die kurzen PROPFIND-Anfragen (ASCII): Zeichen = Bytes.
     const bodyBytes = body === undefined ? 0 : typeof body === "string" ? body.length : body.byteLength;
     const limitMs = this.timeoutMs + Math.ceil((bodyBytes * 1000) / MIN_UPLOAD_BYTES_PER_SECOND);
-    const deadline = new TransferDeadline();
+    const ceiling = performance.now() + this.maxRequestMs;
+    const deadline = new TransferDeadline(
+      Math.min(ceiling, until),
+      until < ceiling
+        ? `Zeitüberschreitung: Das Lesen ohne ETag-Header (PROPFIND, GET, PROPFIND) dauerte zusammen länger als ${duration(this.maxRequestMs)}`
+        : `Zeitüberschreitung: Die Übertragung dauerte länger als die Obergrenze von ${duration(this.maxRequestMs)} je Anfrage`,
+    );
     deadline.restart(limitMs);
     let response: Response;
     try {
@@ -535,9 +574,11 @@ export class WebDavAdapter implements StorageAdapter {
     } catch (error) {
       deadline.stop();
       const reason = deadline.expired
-        ? typeof body !== "string" && bodyBytes > 0
-          ? `Zeitüberschreitung bei der Übertragung: Hochladen samt Antwort des Servers dauerte länger als ${seconds(limitMs)} s (Zeitlimit ${seconds(this.timeoutMs)} s plus Zeit für ${bodyBytes} Byte bei mindestens ${MIN_UPLOAD_BYTES_PER_SECOND / 1024} KiB/s)`
-          : `Zeitüberschreitung: Der Server hat nicht innerhalb von ${seconds(limitMs)} s geantwortet`
+        ? deadline.atCeiling
+          ? deadline.ceilingText
+          : typeof body !== "string" && bodyBytes > 0
+            ? `Zeitüberschreitung bei der Übertragung: Hochladen samt Antwort des Servers dauerte länger als ${seconds(limitMs)} s (Zeitlimit ${seconds(this.timeoutMs)} s plus Zeit für ${bodyBytes} Byte bei mindestens ${MIN_UPLOAD_BYTES_PER_SECOND / 1024} KiB/s)`
+            : `Zeitüberschreitung: Der Server hat nicht innerhalb von ${seconds(limitMs)} s geantwortet`
         : `keine Antwort vom Server (${fetchFailureReason(error, this.#secrets)})`;
       throw new StorageError(`${method} ${describeUrl(url)}: ${reason}.`);
     }
@@ -555,38 +596,56 @@ export class WebDavAdapter implements StorageAdapter {
    *
    * Jedes Stück verlängert die Frist um timeoutMs (Zeitlimit gegen Stillstand), aber nie über die
    * Gesamtfrist hinaus (dos-5): timeoutMs plus die Zeit, die die schon gelesenen Byte bei
-   * minDownloadBytesPerSecond brauchen. Ein Abbruch (Netz, Zeitlimit, Obergrenze) wird zu StorageError.
+   * minDownloadBytesPerSecond brauchen, und nie über die Obergrenze aus send (maxRequestMs).
+   * Ein Abbruch (Netz, Zeitlimit, Obergrenze) wird zu StorageError.
+   *
+   * Speicher (dos-1, Nachprüfung): Nennt der Server ein passendes Content-Length (ohne
+   * Content-Encoding), wird das Ergebnis einmal in dieser Größe angelegt und gefüllt – sonst lägen
+   * am Ende alle Stücke UND das zusammengesetzte Ergebnis im Speicher. Kommen mehr Byte als
+   * angekündigt, geht es mit gesammelten Stücken weiter; Obergrenze und Mindestrate zählen immer
+   * die tatsächlich angekommenen Byte.
    */
   private async readBytes(response: Response, url: URL, maxBytes: number): Promise<Uint8Array> {
     const deadline = this.#deadlines.get(response);
     const aborted = (reason: string) => new StorageError(`Lesen von ${describeUrl(url)} abgebrochen (${reason}).`);
     const tooLarge = `die Antwort des Servers ist größer als ${sizeText(maxBytes)}`;
     const tooSlow = `Zeitüberschreitung: Die Daten kamen im Schnitt langsamer als ${sizeText(this.minDownloadBytesPerSecond)}/s`;
-    if (Number(response.headers.get("Content-Length")) > maxBytes) {
+    const declared = contentLength(response);
+    if (declared !== undefined && declared > maxBytes) {
       await this.discard(response);
       throw aborted(tooLarge);
     }
-    const started = Date.now();
+    const started = performance.now();
     /** true, wenn die laufende Frist die Gesamtfrist ist (nicht das Zeitlimit gegen Stillstand). */
     let atOverallLimit = false;
     try {
       if (response.body === null) return new Uint8Array(await response.arrayBuffer());
       const reader = response.body.getReader();
+      let buffer = declared !== undefined && !isEncoded(response) ? new Uint8Array(declared) : undefined;
       const chunks: Uint8Array[] = [];
       let total = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        total += value.byteLength;
-        const remainingMs = started + this.timeoutMs + (total * 1000) / this.minDownloadBytesPerSecond - Date.now();
-        if (total > maxBytes || remainingMs <= 0) {
-          await reader.cancel().catch(() => undefined); // Übertragung beenden, den Rest nicht lesen
-          throw aborted(total > maxBytes ? tooLarge : tooSlow);
+        if (buffer !== undefined && total + value.byteLength <= buffer.length) {
+          buffer.set(value, total);
+        } else {
+          if (buffer !== undefined) chunks.push(buffer.subarray(0, total)); // mehr als angekündigt
+          buffer = undefined;
+          chunks.push(value);
         }
-        chunks.push(value);
+        total += value.byteLength;
+        const remainingMs = started + this.timeoutMs + (total * 1000) / this.minDownloadBytesPerSecond - performance.now();
+        const atCeiling = deadline !== undefined && deadline.remainingMs() <= 0;
+        if (total > maxBytes || remainingMs <= 0 || atCeiling) {
+          await reader.cancel().catch(() => undefined); // Übertragung beenden, den Rest nicht lesen
+          throw aborted(total > maxBytes ? tooLarge : remainingMs <= 0 ? tooSlow : deadline!.ceilingText);
+        }
         atOverallLimit = remainingMs < this.timeoutMs;
         deadline?.restart(Math.min(this.timeoutMs, remainingMs));
       }
+      // Weniger als angekündigt: nur die gelesenen Byte, ohne den Rest des Puffers.
+      if (buffer !== undefined) return total === buffer.length ? buffer : buffer.slice(0, total);
       const data = new Uint8Array(total);
       let offset = 0;
       for (const chunk of chunks) {
@@ -597,9 +656,11 @@ export class WebDavAdapter implements StorageAdapter {
     } catch (error) {
       if (error instanceof StorageError) throw error;
       const reason = deadline?.expired
-        ? atOverallLimit
-          ? tooSlow
-          : `Zeitüberschreitung: ${seconds(this.timeoutMs)} s lang keine Daten`
+        ? deadline.atCeiling
+          ? deadline.ceilingText
+          : atOverallLimit
+            ? tooSlow
+            : `Zeitüberschreitung: ${seconds(this.timeoutMs)} s lang keine Daten`
         : fetchFailureReason(error, this.#secrets);
       throw aborted(reason);
     } finally {
@@ -656,24 +717,48 @@ interface BackupFile {
  * Zeitlimit für die ganze Übertragung ließe große Tresore auf langsamen Leitungen nie durch).
  * Läuft sie ab, wird die Anfrage mit einem TimeoutError abgebrochen. Nach dem Ende einer
  * Anfrage immer stop() aufrufen, damit kein Zeitgeber übrig bleibt.
+ *
+ * Verlängern lässt sie sich nie über eine feste Obergrenze `end` hinaus (Sicherheitsaudit dos-5,
+ * Nachprüfung). Zeitpunkte sind performance.now(): unabhängig von der Geräteuhr.
  */
 class TransferDeadline {
   private readonly controller = new AbortController();
   private handle: ReturnType<typeof setTimeout> | undefined;
   /** true, sobald die Frist abgelaufen ist (und die Anfrage deshalb abgebrochen wurde). */
   expired = false;
+  /** true, wenn die laufende Frist von der Obergrenze `end` bestimmt wird. */
+  atCeiling = false;
+
+  /**
+   * @param end         Obergrenze (performance.now()), über die keine Frist hinausgeht
+   * @param ceilingText Grund für Meldungen, wenn die Obergrenze erreicht ist
+   */
+  constructor(
+    private readonly end: number,
+    readonly ceilingText: string,
+  ) {}
 
   get signal(): AbortSignal {
     return this.controller.signal;
   }
 
-  /** Frist neu setzen: `ms` ab jetzt. */
+  /** Zeit bis zur Obergrenze in ms (≤ 0: erreicht). */
+  remainingMs(): number {
+    return this.end - performance.now();
+  }
+
+  /** Frist neu setzen: `ms` ab jetzt, höchstens bis zur Obergrenze. */
   restart(ms: number): void {
     this.stop();
-    this.handle = setTimeout(() => {
-      this.expired = true;
-      this.controller.abort(new DOMException("Zeitüberschreitung", "TimeoutError"));
-    }, ms);
+    const remaining = this.remainingMs();
+    this.atCeiling = remaining <= ms;
+    this.handle = setTimeout(
+      () => {
+        this.expired = true;
+        this.controller.abort(new DOMException("Zeitüberschreitung", "TimeoutError"));
+      },
+      Math.max(0, Math.min(ms, remaining)),
+    );
   }
 
   stop(): void {
@@ -685,6 +770,23 @@ class TransferDeadline {
 /** Millisekunden als ganze Sekunden (mindestens 1) für Meldungen. */
 function seconds(ms: number): number {
   return Math.max(1, Math.round(ms / 1000));
+}
+
+/** Dauer für Meldungen: "30 min" bei vollen Minuten, sonst "45 s". */
+function duration(ms: number): string {
+  return ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000} min` : `${seconds(ms)} s`;
+}
+
+/** Content-Length der Antwort, falls der Server eine gültige Zahl nennt. */
+function contentLength(response: Response): number | undefined {
+  const raw = response.headers.get("Content-Length");
+  return raw !== null && /^\s*\d+\s*$/.test(raw) ? Number(raw) : undefined;
+}
+
+/** true, wenn fetch den Körper entpackt: Content-Length nennt dann die Größe VOR dem Entpacken. */
+function isEncoded(response: Response): boolean {
+  const encoding = response.headers.get("Content-Encoding");
+  return encoding !== null && encoding.trim().toLowerCase() !== "identity";
 }
 
 /** Größe für Meldungen: "4 MiB", "16 KiB" oder "1000 Byte". */

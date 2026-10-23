@@ -86,6 +86,13 @@ describe("HMAC-Blockstrom", () => {
     await expect(readHmacBlockStream(huge, BASE_KEY)).rejects.toThrow(corrupt);
   });
 
+  it("Inhalt über der Obergrenze: TooLarge („zu groß für Ownwarden“), nicht Corrupt (Sicherheitsaudit dos-4, Nachprüfung)", async () => {
+    const stream = await writeHmacBlockStream(DATA.subarray(0, 80), BASE_KEY, 40);
+    expect(await readHmacBlockStream(stream, BASE_KEY, 80)).toEqual(DATA.subarray(0, 80));
+    await expect(readHmacBlockStream(stream, BASE_KEY, 79)).rejects.toThrow(expect.objectContaining({ code: "TooLarge" }));
+    await expect(readHmacBlockStream(stream, BASE_KEY, 79)).rejects.toThrow("HMAC-Blockstrom: Inhalt zu groß für Ownwarden (mehr als 79 Byte).");
+  });
+
   it("falscher Schlüssel -> Corrupt", async () => {
     const stream = await writeHmacBlockStream(DATA, BASE_KEY);
     await expect(readHmacBlockStream(stream, new Uint8Array(64))).rejects.toThrow(corrupt);

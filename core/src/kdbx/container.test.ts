@@ -212,7 +212,7 @@ describe("Container: Größengrenzen beim Schreiben (Sicherheitsaudit crypto-3)"
       (e: unknown) => e,
     );
     expect(error).toBeInstanceOf(RangeError);
-    expect((error as Error).message).toMatch(/XML-Datenbank.*16,0 MiB.*höchstens 16 MiB/);
+    expect((error as Error).message).toMatch(/XML-Datenbank.*32,0 MiB.*höchstens 32 MiB/);
     const atLimit = await encryptContainer({ ...payload({ compression: false }), xml: xml(MAX_XML_BYTES) }, PASSWORD);
     expect((await decryptContainer(atLimit, PASSWORD)).xml.length).toBe(MAX_XML_BYTES);
   });
@@ -247,7 +247,9 @@ describe("Kompression und AES-Hilfen", () => {
       },
     });
     const packed = new Uint8Array(await new Response(source.pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
-    await expect(gunzip(packed)).rejects.toThrow(code("Corrupt"));
+    // Nachprüfung: TooLarge („zu groß für Ownwarden“) statt Corrupt – die Daten sind ja gültig
+    await expect(gunzip(packed)).rejects.toThrow(code("TooLarge"));
+    await expect(gunzip(packed)).rejects.toThrow("Entpackter Inhalt zu groß für Ownwarden (mehr als 256 MiB).");
   });
 
   it("GZip-Rundreise und Größenbremse beim Entpacken", async () => {
@@ -255,7 +257,7 @@ describe("Kompression und AES-Hilfen", () => {
     const packed = await gzip(data);
     expect(packed.length).toBeLessThan(10_000);
     expect(sameBytes(await gunzip(packed), data)).toBe(true);
-    await expect(gunzip(packed, 1000)).rejects.toThrow(code("Corrupt"));
+    await expect(gunzip(packed, 1000)).rejects.toThrow(code("TooLarge"));
     await expect(gunzip(Uint8Array.of(1, 2, 3, 4))).rejects.toThrow(code("Corrupt"));
   });
 

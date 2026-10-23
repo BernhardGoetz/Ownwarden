@@ -11,9 +11,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CORE_DIR, createTmpDir, removeTmpDir } from "../../test/helpers/keepassxc";
 import { TEST_KDF } from "../../test/helpers/kdbx-files";
 import { startWebDavTestServer, webDavTestServerAvailable, type WebDavTestServer } from "../../test/helpers/webdav-server";
+import { encryptContainer } from "../kdbx/container";
 import { readKdbx } from "../kdbx/index";
+import { MAX_XML_NODES } from "../kdbx/xml-dom";
 import { findEntry } from "../merge/tree";
-import type { Vault } from "../model";
+import type { KdbxSettings, Vault } from "../model";
 import { writeFileAtomic } from "./atomic-file";
 import { LOCAL_BACKUP_FOLDER } from "./local-backups";
 import { isMainModule } from "./main-module";
@@ -214,6 +216,20 @@ describe("Kommandozeile des Prototyps", () => {
     expect(wrong.code).toBe(1);
     expect(wrong.fake.err).toEqual(["Fehler: Falsches Master-Passwort (oder falsche Datei)."]);
     expect(readFileSync(path).equals(before)).toBe(true);
+  });
+
+  it("Tresor zu groß für Ownwarden: verständliche Meldung statt „beschädigt“ (Sicherheitsaudit dos-4, Nachprüfung)", async () => {
+    // Gültige Datei mit dem richtigen Passwort, deren XML mehr Bestandteile hat, als Ownwarden einliest
+    const path = file("zu-gross.kdbx");
+    const xml = new TextEncoder().encode(`<KeePassFile><Root>${"<a/>".repeat(MAX_XML_NODES)}</Root></KeePassFile>`);
+    const settings: KdbxSettings = { versionMinor: 1, cipher: "chacha20", compression: true, kdf: TEST_KDF };
+    const bytes = await encryptContainer({ settings, innerStreamId: "chacha20", innerStreamKey: new Uint8Array(64), binaries: [], xml }, { password: MASTER });
+    writeFileSync(path, bytes);
+    const result = await cli(["ls", path]);
+    expect(result.code).toBe(1);
+    expect(result.fake.err).toHaveLength(1);
+    expect(result.fake.err[0]).toMatch(/^Fehler: XML-Datenbank: zu groß für Ownwarden – .*mehr als 1500000 /);
+    expect(result.fake.err[0]).toMatch(/Die Datei ist nicht beschädigt.*KeePassXC/);
   });
 
   it("überzählige Argumente (oft ein versehentlich eingetipptes Passwort) werden nicht wiederholt", async () => {

@@ -15,6 +15,7 @@ import {
 } from "./xml-dom";
 
 const corrupt = expect.objectContaining({ name: "KdbxError", code: "Corrupt" });
+const tooLarge = expect.objectContaining({ name: "KdbxError", code: "TooLarge" });
 
 /** Fehlermeldung von `run` (wirft `run` nicht, schlägt der Test fehl). */
 function errorOf(run: () => unknown): Error {
@@ -89,18 +90,21 @@ describe("parseXml: sicher einlesen", () => {
 
   it("lehnt Text über MAX_XML_BYTES Zeichen ab (Sicherheitsaudit dos-4)", () => {
     const xml = `<a>${" ".repeat(MAX_XML_BYTES)}</a>`;
-    expect(() => parseXml(xml, "T")).toThrow(corrupt);
-    expect(() => parseXml(xml, "T")).toThrow(/zu groß/);
+    // Nachprüfung: TooLarge („zu groß für Ownwarden“) statt Corrupt („beschädigt“)
+    expect(() => parseXml(xml, "T")).toThrow(tooLarge);
+    expect(() => parseXml(xml, "T")).toThrow("T: zu groß für Ownwarden – XML ist zu groß (mehr als 32 MiB).");
   });
 
   it("lehnt dichtes XML mit mehr als MAX_XML_NODES Bestandteilen ab, bevor xmldom Speicher belegt (Sicherheitsaudit dos-4)", () => {
-    // 4 MiB "<a/>" wären für xmldom über eine Million Elemente (über 1 GB Speicher); eine echte
-    // Datei braucht über 30 Byte je Element.
-    expect(MAX_XML_NODES).toBe(MAX_XML_BYTES / 16);
+    // 6 MiB "<a/>" wären für xmldom 1,5 Millionen Elemente (weit über 1 GB Speicher); eine echte
+    // Datei braucht fast 30 Byte je Element. Nachprüfung: Grenze nicht mehr MAX_XML_BYTES / 16,
+    // sondern so, dass bei echten Dateien die Byte-Grenze zuerst greift.
+    expect(MAX_XML_NODES).toBe(1_500_000);
     const xml = `<KeePassFile>${"<a/>".repeat(MAX_XML_NODES)}</KeePassFile>`;
     const start = performance.now();
-    expect(() => parseXml(xml, "T")).toThrow(/T: XML hat zu viele Bestandteile/);
+    expect(() => parseXml(xml, "T")).toThrow(tooLarge);
     expect(performance.now() - start).toBeLessThan(1000);
+    expect(() => parseXml(xml, "T")).toThrow(/^T: zu groß für Ownwarden – XML hat zu viele Bestandteile \(mehr als 1500000 /);
     expect(() => parseXml(`<a b="1">${'<c d="2"/>'.repeat(10)}</a>`, "T")).not.toThrow();
   });
 
@@ -171,6 +175,17 @@ describe("parseXml: sicher einlesen", () => {
     );
     // Für unbekannte Elemente AUS DEM MODELL (geschützte Werte im Klartext) bleiben sie lesbar.
     expect(plainText(parseXml("<v>a&#1;b</v>", "T", { allowInvalidChars: true }), "T")).toBe("a\u0001b");
+  });
+
+  it("nennt Element- und Attributnamen aus der Datei nur gekürzt (Sicherheitsaudit leak-1)", () => {
+    // Steuer- und Bidi-Zeichen lehnt schon xmldom in Namen ab; ein Name kann aber Megabytes lang sein.
+    const long = "x".repeat(100_000);
+    for (const xml of [`<xml:${long}/>`, `<a xml:${long}="1"/>`, `<a ${long}="&#1;"/>`, `<${long}>&#1;</${long}>`]) {
+      const message = errorOf(() => parseXml(xml, "T")).message;
+      expect(message).toMatch(/^T: (Namensraum-Präfixe|.*ungültiges Zeichen)/);
+      expect(message).toContain("…");
+      expect(message.length).toBeLessThan(300);
+    }
   });
 
   it("gibt fremden Text aus Meldungen von xmldom nur entschärft weiter (Sicherheitsaudit leak-1)", () => {
@@ -261,17 +276,29 @@ describe("findXmlLimitViolation: lineare Vorprüfung vor xmldom (Sicherheitsaudi
   });
 
   it("braucht lineare Zeit, auch für bösartig verschachtelte oder lange Dokumente", () => {
-    const n = 80_000;
+    // Verglichen wird die Zeit für n und 4n Wiederholungen (jeweils die schnellste von fünf
+    // Messungen): linear ist das etwa das 4-Fache (gemessen 2,2–5,3, auch unter Last), quadratisch
+    // das 16-Fache. Ein fester Grenzwert in Millisekunden hing zu sehr von der Last des Rechners ab.
+    const n = 60_000;
     const unlimited = { maxLength: Infinity, maxDepth: Infinity, maxNamespaceDeclarations: Infinity, maxNodes: Infinity };
     const documents = [
-      '<x xmlns:a="u">'.repeat(n) + "</x>".repeat(n),
-      `<a ${Array.from({ length: n }, (_, i) => `xmlns:p${i}="u"`).join(" ")}/>`,
-      `<a>${"<!---->".repeat(n)}${"<?p?>".repeat(n)}${"<![CDATA[]]>".repeat(n)}${'<b c=">"/>'.repeat(n)}</a>`,
+      (count: number) => '<x xmlns:a="u">'.repeat(count) + "</x>".repeat(count),
+      (count: number) => `<a ${Array.from({ length: count }, (_, i) => `xmlns:p${i}="u"`).join(" ")}/>`,
+      (count: number) => `<a>${"<!---->".repeat(count)}${"<?p?>".repeat(count)}${"<![CDATA[]]>".repeat(count)}${'<b c=">"/>'.repeat(count)}</a>`,
     ];
-    for (const xml of documents) {
-      const start = performance.now();
-      expect(findXmlLimitViolation(xml, unlimited)).toBeUndefined();
-      expect(performance.now() - start).toBeLessThan(500);
+    const fastest = (xml: string): number => {
+      let best = Infinity;
+      for (let run = 0; run < 5; run++) {
+        const start = performance.now();
+        expect(findXmlLimitViolation(xml, unlimited)).toBeUndefined();
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    for (const make of documents) {
+      const small = fastest(make(n));
+      const large = fastest(make(4 * n));
+      expect(large / small, `${small.toFixed(1)} ms -> ${large.toFixed(1)} ms`).toBeLessThan(10);
     }
   });
 });

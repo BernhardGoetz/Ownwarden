@@ -27,6 +27,7 @@ import {
   KDBX_SUPPORTED_MINOR_VERSIONS,
   LEGACY_HEADER_FIELDS,
   MASTER_SEED_LENGTH,
+  MAX_OUTER_HEADER_BYTES,
 } from "./constants";
 import { parseKdfParameters, serializeKdfParameters } from "./kdf";
 import { parseVariantDictionary } from "./variant-dictionary";
@@ -69,6 +70,7 @@ export function parseOuterHeader(file: Uint8Array): ParsedOuterHeader {
   for (;;) {
     const fieldId = reader.readU8("Feld-ID");
     const length = reader.readU32(`Länge von Feld ${fieldId}`);
+    requireHeaderLimit(reader.offset + length);
     const data = reader.readBytes(length, `Daten von Feld ${fieldId}`);
     if (fieldId === HeaderFieldId.EndOfHeader) break;
     if (LEGACY_HEADER_FIELDS.has(fieldId)) corrupt(`${CONTEXT}: KDBX-3-Feld ${fieldId} in einer KDBX-4-Datei.`);
@@ -118,6 +120,9 @@ export function parseOuterHeader(file: Uint8Array): ParsedOuterHeader {
  * decryptContainer prüft damit die Header-SHA-256, bevor parseOuterHeader die KDF-Parameter
  * bewertet: Ein zufällig beschädigter Header soll „beschädigt“ heißen und nicht zum Ändern der
  * KDF-Einstellungen raten (Sicherheitsaudit crypto-1).
+ *
+ * Einen Header über MAX_OUTER_HEADER_BYTES lehnt es ab, sobald das feststeht, also auch vor der
+ * SHA-256 (Sicherheitsaudit dos-1, Nachprüfung).
  */
 export function outerHeaderLength(file: Uint8Array): number {
   const reader = new ByteReader(file, CONTEXT);
@@ -125,8 +130,21 @@ export function outerHeaderLength(file: Uint8Array): number {
   for (;;) {
     const fieldId = reader.readU8("Feld-ID");
     const length = reader.readU32(`Länge von Feld ${fieldId}`);
+    requireHeaderLimit(reader.offset + length);
     reader.readView(length, `Daten von Feld ${fieldId}`);
     if (fieldId === HeaderFieldId.EndOfHeader) return reader.offset;
+  }
+}
+
+/**
+ * Bricht ab, wenn der Header bis `end` (Ende des nächsten Felds) länger als MAX_OUTER_HEADER_BYTES
+ * würde – vor dem Lesen des Felds. Corrupt statt TooLarge: Der Header ist hier noch ungeprüft,
+ * und echte Dateien haben wenige hundert Byte; wahrscheinlich ist die Datei beschädigt oder
+ * manipuliert.
+ */
+function requireHeaderLimit(end: number): void {
+  if (end > MAX_OUTER_HEADER_BYTES) {
+    corrupt(`${CONTEXT}: unplausibel lang (mehr als ${MAX_OUTER_HEADER_BYTES / 1024} KiB; echte Dateien haben wenige hundert Byte).`);
   }
 }
 
@@ -203,5 +221,12 @@ export function serializeOuterHeader(header: OuterHeader): Uint8Array {
     field(HeaderFieldId.PublicCustomData, header.publicCustomData);
   }
   field(HeaderFieldId.EndOfHeader, END_OF_HEADER_DATA);
+  // Nie einen Header schreiben, den das Lesen ablehnt (siehe requireHeaderLimit).
+  if (writer.byteLength > MAX_OUTER_HEADER_BYTES) {
+    throw new RangeError(
+      `Äußerer Header: ${writer.byteLength} Byte, höchstens ${MAX_OUTER_HEADER_BYTES / 1024} KiB sind erlaubt ` +
+        "(zu große öffentliche Zusatzdaten).",
+    );
+  }
   return writer.toBytes();
 }

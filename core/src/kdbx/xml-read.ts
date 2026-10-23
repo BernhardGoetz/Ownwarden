@@ -12,13 +12,15 @@
  *   - Unbekannte Kind-Elemente von <Meta>, <Group>, <Entry> und <Root> werden als kompakter
  *     XML-Text in `unknown` aufbewahrt (geschützte Werte darin im Klartext mit
  *     Protected="True"), damit beim Speichern nichts verloren geht.
- *   - Fehlermeldungen nennen Elementnamen, Feldnamen und UUIDs, aber nie Feldinhalte.
+ *   - Fehlermeldungen nennen Elementnamen, Feldnamen und UUIDs, aber nie Feldinhalte. Namen aus
+ *     der Datei nur über displayText (Sicherheitsaudit leak-1).
  *   - Doppelte UUIDs von Gruppen/Einträgen: Das spätere Vorkommen bekommt eine neue,
  *     abgeleitete UUID (duplicate-uuids.ts), damit beim Zusammenführen nichts verloren geht.
  *
  * Elementnamen abgeglichen mit KeePassXC 2.7.6 (src/format/KdbxXmlReader.cpp).
  */
 import type { PoolBinary } from "../contracts";
+import { displayText } from "../display-text";
 import {
   NULL_UUID,
   type Attachment,
@@ -121,6 +123,15 @@ const TIMES_ELEMENTS = new Set([
 ]);
 
 /**
+ * Feld-, Anhangs- oder CustomData-Name aus der Datei für Meldungen, in Anführungszeichen. Er darf
+ * Zeilenumbrüche, C1-Steuer- und Bidi-Zeichen enthalten und Megabytes lang sein: nur entschärft
+ * und gekürzt (Sicherheitsaudit leak-1).
+ */
+function quoted(name: string): string {
+  return `"${displayText(name)}"`;
+}
+
+/**
  * Die Kind-Elemente eines Elements, nach Namen einsortiert. Kinder, deren Name nicht in
  * `known` steht, kommen in Originalreihenfolge nach `unknown`.
  */
@@ -209,7 +220,7 @@ class VaultReader {
   // -------------------------------------------------------------------------
 
   readKeePassFile(document: XmlElement, settings: KdbxSettings): Vault {
-    if (document.name !== "KeePassFile") corrupt(`XML-Datenbank: Wurzelelement ist <${document.name}> statt <KeePassFile>.`);
+    if (document.name !== "KeePassFile") corrupt(`XML-Datenbank: Wurzelelement ist <${displayText(document.name)}> statt <KeePassFile>.`);
     // Andere Kinder als <Meta> und <Root> sieht kein bekanntes Programm vor; sie fallen weg.
     const children = new Children(document, KEEPASS_FILE_ELEMENTS, "KeePassFile");
     const metaElement = children.optional("Meta");
@@ -370,14 +381,14 @@ class VaultReader {
     const c = new Children(element, new Set(["Key", "Value"]), `${what}/String`);
     const key = this.text(c.required("Key"), `${what}/String/Key`);
     const valueElement = c.required("Value");
-    const value = this.text(valueElement, `${what}/String "${key}"`);
+    const value = this.text(valueElement, `${what}/String ${quoted(key)}`);
     // ProtectInMemory="True" steht in unverschlüsselten XML-Exporten: Der Wert ist Klartext,
     // soll beim Speichern aber geschützt werden.
     const isProtected = isProtectedElement(valueElement) || isTrueAttribute(valueElement.attributes.get("ProtectInMemory"));
 
     const existing = strings.get(key);
     // Wie KeePassXC: Ein doppeltes Feld ist nur erlaubt, wenn das frühere leer war.
-    if (existing !== undefined && existing.value !== "") corrupt(`${what}: Feld "${key}" kommt doppelt vor.`);
+    if (existing !== undefined && existing.value !== "") corrupt(`${what}: Feld ${quoted(key)} kommt doppelt vor.`);
     strings.set(key, { value, protected: isProtected });
   }
 
@@ -386,13 +397,13 @@ class VaultReader {
     const c = new Children(element, new Set(["Key", "Value"]), `${what}/Binary`);
     const name = this.text(c.required("Key"), `${what}/Binary/Key`);
     const valueElement = c.required("Value");
-    const attachment = { name, ...this.resolveAttachmentData(valueElement, `${what}/Anhang "${name}"`) };
+    const attachment = { name, ...this.resolveAttachmentData(valueElement, `${what}/Anhang ${quoted(name)}`) };
 
     const existing = attachments.find((a) => a.name === name);
     if (existing === undefined) {
       attachments.push(attachment);
     } else if (existing.protected !== attachment.protected || !bytesEqual(existing.data, attachment.data)) {
-      corrupt(`${what}: Anhang "${name}" kommt doppelt mit unterschiedlichem Inhalt vor.`);
+      corrupt(`${what}: Anhang ${quoted(name)} kommt doppelt mit unterschiedlichem Inhalt vor.`);
     }
     // Doppelt mit gleichem Inhalt: einmal reicht.
   }
@@ -456,13 +467,13 @@ class VaultReader {
       if (itemElement.name !== "Item") continue;
       const c = new Children(itemElement, new Set(["Key", "Value", "LastModificationTime"]), `${what}/Item`);
       const key = this.text(c.required("Key"), `${what}/Item/Key`);
-      const value = this.text(c.required("Value"), `${what}/Item "${key}"`);
+      const value = this.text(c.required("Value"), `${what}/Item ${quoted(key)}`);
       const lastModifiedElement = c.optional("LastModificationTime");
       const hasLastModified = lastModifiedElement !== undefined && this.text(lastModifiedElement, what).trim() !== "";
       customData.set(
         key,
         hasLastModified
-          ? { value, lastModified: this.time(lastModifiedElement, `${what}/Item "${key}"/LastModificationTime`) }
+          ? { value, lastModified: this.time(lastModifiedElement, `${what}/Item ${quoted(key)}/LastModificationTime`) }
           : { value },
       );
     }
@@ -480,7 +491,7 @@ class VaultReader {
 
   private withPlaintext(element: XmlElement): XmlElement {
     if (this.context.plaintexts.has(element)) {
-      return { ...element, children: [this.text(element, `Geschützter Wert in <${element.name}>`)] };
+      return { ...element, children: [this.text(element, `Geschützter Wert in <${displayText(element.name)}>`)] };
     }
     return {
       ...element,

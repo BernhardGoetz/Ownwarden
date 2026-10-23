@@ -16,6 +16,7 @@
  * Browser-Erweiterung, braucht keine DOM-Globals).
  */
 import { DOMParser, type Node as DomNode } from "@xmldom/xmldom";
+import { KdbxError } from "../contracts";
 import { displayText } from "../display-text";
 import { corrupt } from "./bytes";
 import { MAX_XML_BYTES } from "./constants";
@@ -42,11 +43,15 @@ export const MAX_XML_DEPTH = 1000;
 /**
  * Höchstzahl der Bestandteile (Elemente, Attribute, Kommentare, Verarbeitungsanweisungen,
  * CDATA) beim Einlesen (Sicherheitsaudit dos-4). xmldom braucht je Bestandteil rund 1 KB
- * Speicher. Echte Dateien haben über 30 Byte je Bestandteil (16 MiB ≈ 500 000); dichtes XML
- * wie "<a/><a/>…" schafft 4 Byte (gemessen: schon 8 MiB davon sprengen den Standard-Heap von
- * Node mit 2 GB). Erlaubt sind im Schnitt 16 Byte je Bestandteil.
+ * Speicher. Dichtes XML wie "<a/><a/>…" schafft 4 Byte je Bestandteil (gemessen: schon 8 MiB
+ * davon sprengen den Standard-Heap von Node mit 2 GB).
+ *
+ * Bei echten Dateien soll die Byte-Grenze MAX_XML_BYTES zuerst greifen (Nachprüfung; vorher
+ * MAX_XML_BYTES / 16): KeePassXC 2.7.6 schreibt 30 (Einträge fast ohne Inhalt) bis 42 Byte
+ * (übliche Einträge mit Verlauf) je Bestandteil, Ownwarden ab 29 (leere Standardfelder). Bei
+ * 32 MiB sind das höchstens rund 1,16 Millionen; erlaubt sind 1,5 Millionen (im Schnitt 22 Byte).
  */
-export const MAX_XML_NODES = MAX_XML_BYTES / 16;
+export const MAX_XML_NODES = 1_500_000;
 
 // ---------------------------------------------------------------------------
 // Aufbauen
@@ -86,7 +91,7 @@ export function childElements(element: XmlElement): XmlElement[] {
 export function plainText(element: XmlElement, context: string): string {
   let text = "";
   for (const child of element.children) {
-    if (typeof child !== "string") corrupt(`${context}: <${element.name}> darf nur Text enthalten.`);
+    if (typeof child !== "string") corrupt(`${context}: <${displayText(element.name)}> darf nur Text enthalten.`);
     text += child;
   }
   return text;
@@ -151,7 +156,18 @@ const SKIPPED_SECTIONS: readonly (readonly [opening: string, closing: string])[]
  * @returns das Problem (deutsch, ohne Inhalt aus dem Text) oder undefined
  */
 export function findXmlLimitViolation(text: string, limits: XmlLimits): string | undefined {
-  if (text.length > limits.maxLength) return `XML ist zu groß (mehr als ${formatLength(limits.maxLength)})`;
+  return findViolation(text, limits)?.message;
+}
+
+/**
+ * Wie findXmlLimitViolation, sagt aber zusätzlich, ob das Problem nur die Größe ist (zu lang, zu
+ * viele Bestandteile): Dann ist das XML vielleicht gültig, nur zu groß für Ownwarden (KdbxError
+ * „TooLarge“ statt „Corrupt“, siehe parseXml).
+ */
+function findViolation(text: string, limits: XmlLimits): { message: string; tooLarge: boolean } | undefined {
+  const tooLarge = (message: string) => ({ message, tooLarge: true });
+  const invalid = (message: string) => ({ message, tooLarge: false });
+  if (text.length > limits.maxLength) return tooLarge(`XML ist zu groß (mehr als ${formatLength(limits.maxLength)})`);
   /** Je offenes Element: Zahl seiner eigenen Namensraum-Deklarationen. */
   const open: number[] = [];
   let declarations = 0;
@@ -164,26 +180,28 @@ export function findXmlLimitViolation(text: string, limits: XmlLimits): string |
     if (next === "/") {
       // End-Tag: wie bei xmldom bis zum nächsten ">".
       const end = text.indexOf(">", tagStart + 2);
-      if (end < 0 || open.length === 0) return invalidMarkup(tagStart);
+      if (end < 0 || open.length === 0) return invalid(invalidMarkup(tagStart));
       declarations -= open.pop()!;
       pos = end + 1;
     } else if (next === "?" || next === "!") {
       const section = SKIPPED_SECTIONS.find(([opening]) => text.startsWith(opening, tagStart));
-      if (section === undefined) return invalidMarkup(tagStart); // z. B. <!ELEMENT oder <![IGNORE[
+      if (section === undefined) return invalid(invalidMarkup(tagStart)); // z. B. <!ELEMENT oder <![IGNORE[
       const end = text.indexOf(section[1], tagStart + section[0].length);
-      if (end < 0) return invalidMarkup(tagStart);
-      if (++nodes > limits.maxNodes) return tooManyNodes(limits.maxNodes);
+      if (end < 0) return invalid(invalidMarkup(tagStart));
+      if (++nodes > limits.maxNodes) return tooLarge(tooManyNodes(limits.maxNodes));
       pos = end + section[1].length;
     } else {
       const tag = scanStartTag(text, tagStart + 1);
-      if (tag === undefined) return invalidMarkup(tagStart);
+      if (tag === undefined) return invalid(invalidMarkup(tagStart));
       nodes += 1 + tag.attributes;
-      if (nodes > limits.maxNodes) return tooManyNodes(limits.maxNodes);
-      if (open.length + 1 > limits.maxDepth) return `XML ist zu tief verschachtelt (mehr als ${limits.maxDepth} Ebenen)`;
+      if (nodes > limits.maxNodes) return tooLarge(tooManyNodes(limits.maxNodes));
+      if (open.length + 1 > limits.maxDepth) return invalid(`XML ist zu tief verschachtelt (mehr als ${limits.maxDepth} Ebenen)`);
       if (declarations + tag.declarations > limits.maxNamespaceDeclarations) {
-        return limits.maxNamespaceDeclarations === 0
-          ? "Namensraum-Deklarationen (xmlns) sind nicht erlaubt"
-          : `zu viele Namensraum-Deklarationen (mehr als ${limits.maxNamespaceDeclarations} gleichzeitig gültige)`;
+        return invalid(
+          limits.maxNamespaceDeclarations === 0
+            ? "Namensraum-Deklarationen (xmlns) sind nicht erlaubt"
+            : `zu viele Namensraum-Deklarationen (mehr als ${limits.maxNamespaceDeclarations} gleichzeitig gültige)`,
+        );
       }
       if (!tag.selfClosing) {
         open.push(tag.declarations);
@@ -304,7 +322,8 @@ const REPLACEMENT_CHARACTER_WARNING = "Unicode replacement character detected";
  *   - Dokumente mit DOCTYPE oder ENTITY-Deklaration werden abgelehnt (Schutz vor XXE und
  *     „Billion Laughs“). KDBX-Dateien enthalten nie eine DTD.
  *   - Größe, Tiefe, Namensräume und Zahl der Bestandteile prüft findXmlLimitViolation,
- *     bevor xmldom läuft (Sicherheitsaudit xml-1, dos-4).
+ *     bevor xmldom läuft (Sicherheitsaudit xml-1, dos-4). Ist nur die Größe das Problem (zu lang,
+ *     zu viele Bestandteile), heißt der Fehler „TooLarge“ (zu groß für Ownwarden), sonst „Corrupt“.
  *   - KDBX benutzt keine Namensräume: Deklarationen und Namen mit Präfix (p:Entry, xml:space)
  *     sind ein Fehler. KeePassXC vergleicht nur den lokalen Namen und läse <p:Entry> als
  *     Eintrag, Ownwarden sähe ein unbekanntes Element (Sicherheitsaudit xml-4, xml-5).
@@ -317,8 +336,9 @@ export function parseXml(text: string, context: string, options: ParseXmlOptions
   if (/<!DOCTYPE|<!ENTITY/i.test(text)) {
     corrupt(`${context}: DOCTYPE- und ENTITY-Deklarationen sind nicht erlaubt.`);
   }
-  const problem = findXmlLimitViolation(text, KDBX_XML_LIMITS);
-  if (problem !== undefined) corrupt(`${context}: ${problem}.`);
+  const problem = findViolation(text, KDBX_XML_LIMITS);
+  if (problem?.tooLarge) throw new KdbxError("TooLarge", `${context}: zu groß für Ownwarden – ${problem.message}.`);
+  if (problem !== undefined) corrupt(`${context}: ${problem.message}.`);
   let reason: string | undefined;
   const parser = new DOMParser({
     locator: false,
@@ -372,15 +392,21 @@ function convertDomElement(node: DomNode, depth: number, context: string, allowI
   const name = domElement.nodeName;
   // Namensraum-Deklarationen lehnt schon die Vorprüfung ab; übrig bleibt das vordefinierte
   // Präfix xml: (z. B. <xml:x>, xml:space="preserve").
-  if (name.includes(":")) corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (<${name}>).`);
+  // Namen in Meldungen nur über displayText: Sie stammen aus der Datei und können Megabytes lang
+  // sein (Sicherheitsaudit leak-1; Steuer- und Bidi-Zeichen lehnt xmldom in Namen schon ab).
+  if (name.includes(":")) corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (<${displayText(name)}>).`);
 
   const attributes = new Map<string, string>();
   for (let i = 0; i < domElement.attributes.length; i++) {
     const attribute = domElement.attributes.item(i);
     if (!attribute) continue;
-    if (attribute.name.includes(":")) corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (${attribute.name} in <${name}>).`);
+    if (attribute.name.includes(":")) {
+      corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (${displayText(attribute.name)} in <${displayText(name)}>).`);
+    }
     const invalid = allowInvalidChars ? undefined : findInvalidXmlChar(attribute.value);
-    if (invalid !== undefined) corrupt(`${context}: Attribut ${attribute.name} in <${name}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
+    if (invalid !== undefined) {
+      corrupt(`${context}: Attribut ${displayText(attribute.name)} in <${displayText(name)}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
+    }
     attributes.set(attribute.name, attribute.value);
   }
 
@@ -394,7 +420,7 @@ function convertDomElement(node: DomNode, depth: number, context: string, allowI
       const data = (child as unknown as { data: string }).data;
       // xmldom prüft die Zeichen nicht; geprüft wird der Text NACH dem Auflösen von &#…;.
       const invalid = allowInvalidChars ? undefined : findInvalidXmlChar(data);
-      if (invalid !== undefined) corrupt(`${context}: <${name}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
+      if (invalid !== undefined) corrupt(`${context}: <${displayText(name)}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
       const last = children[children.length - 1];
       if (typeof last === "string") children[children.length - 1] = last + data;
       else children.push(data);

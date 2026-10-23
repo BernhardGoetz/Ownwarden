@@ -17,6 +17,7 @@ import { syncVault } from "./sync";
 import { createJsonCodec } from "./testing/json-codec";
 import {
   MAX_PROPFIND_BYTES,
+  MAX_REQUEST_MS,
   MAX_VAULT_FILE_BYTES,
   MIN_DOWNLOAD_BYTES_PER_SECOND,
   MIN_UPLOAD_BYTES_PER_SECOND,
@@ -229,14 +230,16 @@ describe("Mindestrate beim Herunterladen (Sicherheitsaudit dos-5)", () => {
   });
 
   it("ein Download über der Mindestrate darf länger dauern als das Zeitlimit (Sicherheitsaudit dos-5)", async () => {
-    // 2000 Byte/s bei einer Mindestrate von 1000 Byte/s: 10 Stücke in etwa 500 ms, Zeitlimit 100 ms.
-    const { adapter } = fakeAdapter((request) => streamedBody(request.init, { chunks: 10, size: 100, everyMs: 50 }).response, {
-      timeoutMs: 100,
+    // 2000 Byte/s bei einer Mindestrate von 1000 Byte/s: 20 Stücke in etwa 1000 ms, Zeitlimit 300 ms.
+    // Abstand zwischen den Stücken (50 ms) weit unter dem Zeitlimit, damit ein ausgelasteter
+    // Rechner den Test nicht scheitern lässt.
+    const { adapter } = fakeAdapter((request) => streamedBody(request.init, { chunks: 20, size: 100, everyMs: 50 }).response, {
+      timeoutMs: 300,
       minDownloadBytesPerSecond: 1000,
     });
     const started = Date.now();
-    expect((await adapter.read())!.data).toHaveLength(1000);
-    expect(Date.now() - started).toBeGreaterThan(200);
+    expect((await adapter.read())!.data).toHaveLength(2000);
+    expect(Date.now() - started).toBeGreaterThan(600);
   });
 
   it("echtes fetch: Tröpfeln über HTTP endet ebenfalls (Sicherheitsaudit dos-5)", async () => {
@@ -250,6 +253,137 @@ describe("Mindestrate beim Herunterladen (Sicherheitsaudit dos-5)", () => {
     const started = Date.now();
     expect(String(await caught(adapter.read()))).toMatch(/langsamer als/);
     expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("eine vorgestellte oder zurückgestellte Geräteuhr verlängert die Frist nicht (Sicherheitsaudit dos-5, Nachprüfung)", async () => {
+    // Wie oben (Zeitlimit 200 ms, ein Byte alle 100 ms), aber die Uhr springt bei jedem Ablesen
+    // eine Stunde zurück. Mit Date.now() wüchse die Gesamtfrist dadurch immer weiter.
+    let clock = Date.now();
+    const realNow = Date.now;
+    Date.now = () => (clock -= 3_600_000);
+    try {
+      const { adapter } = fakeAdapter((request) => streamedBody(request.init, { chunks: 30, size: 1, everyMs: 100 }).response, {
+        timeoutMs: 200,
+        minDownloadBytesPerSecond: 1000,
+      });
+      const started = performance.now();
+      const error = await caught(adapter.read());
+      expect(performance.now() - started).toBeLessThan(1500);
+      expect(String(error)).toMatch(/im Schnitt langsamer als 1000 Byte\/s/);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
+/** Antwort nach `ms` Millisekunden; bricht wie fetch ab, wenn die Anfrage abgebrochen wird. */
+function delayed(init: RequestInit, ms: number, respond: () => Response): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(respond()), ms);
+    init.signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(init.signal!.reason);
+    });
+  });
+}
+
+describe("Obergrenze je Anfrage (Sicherheitsaudit dos-5, Nachprüfung)", () => {
+  it("Standard: 30 Minuten; muss eine positive Zahl sein (Sicherheitsaudit dos-5)", () => {
+    expect(MAX_REQUEST_MS).toBe(30 * 60 * 1000);
+    for (const maxRequestMs of [0, -1, Number.NaN]) {
+      expect(() => fakeAdapter(() => new Response(), { maxRequestMs })).toThrow(RangeError);
+    }
+  });
+
+  it("auch ein Download über der Mindestrate endet nach maxRequestMs (Sicherheitsaudit dos-5)", async () => {
+    // 5000 Byte/s, Mindestrate 1 Byte/s, kein Stillstand: Ohne Obergrenze käme read() nach 2 s durch.
+    let body: ReturnType<typeof streamedBody> | undefined;
+    const { adapter } = fakeAdapter(
+      (request) => {
+        body = streamedBody(request.init, { chunks: 100, size: 100, everyMs: 20 });
+        return body.response;
+      },
+      { timeoutMs: 1000, minDownloadBytesPerSecond: 1, maxRequestMs: 300 },
+    );
+    const started = performance.now();
+    const error = await caught(adapter.read());
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(error).toBeInstanceOf(StorageError);
+    expect(String(error)).toMatch(/Zeitüberschreitung: Die Übertragung dauerte länger als die Obergrenze von 1 s je Anfrage/);
+    expect(body!.state.pulled).toBeLessThan(60);
+  });
+
+  it("auch das Warten auf die Antwort endet nach maxRequestMs (Sicherheitsaudit dos-5)", async () => {
+    const { adapter } = fakeAdapter((request) => delayed(request.init, 3000, () => new Response("spät")), {
+      timeoutMs: 2500,
+      maxRequestMs: 200,
+    });
+    const started = performance.now();
+    const error = await caught(adapter.read());
+    expect(performance.now() - started).toBeLessThan(1500);
+    expect(error).toBeInstanceOf(StorageError);
+    expect(String(error)).toMatch(/GET .*Zeitüberschreitung: Die Übertragung dauerte länger als die Obergrenze von 1 s je Anfrage/);
+  });
+
+  it("Lesen ohne ETag (PROPFIND, GET, PROPFIND, bis zu dreimal) hat insgesamt höchstens maxRequestMs (Sicherheitsaudit dos-5)", async () => {
+    // Jede PROPFIND-Antwort braucht 250 ms und nennt einen neuen ETag: Ohne Gesamtgrenze liefe
+    // das Lesen dreimal durch (über 1,5 s) und endete erst dann.
+    let etag = 0;
+    const propfind = () =>
+      multistatus(
+        `<d:response><d:href>/remote.php/webdav/Ownwarden/tresor.kdbx</d:href><d:propstat><d:prop><d:getetag>"${++etag}"</d:getetag><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`,
+      );
+    const { adapter, requests } = fakeAdapter(
+      (request) => (request.method === "PROPFIND" ? delayed(request.init, 250, propfind) : new Response("inhalt")),
+      { timeoutMs: 2000, maxRequestMs: 600 },
+    );
+    const started = performance.now();
+    const error = await caught(adapter.read());
+    expect(performance.now() - started).toBeLessThan(1200);
+    expect(error).toBeInstanceOf(StorageError);
+    expect(String(error)).toMatch(/PROPFIND .*Zeitüberschreitung/);
+    expect(requests.filter((request) => request.method === "PROPFIND").length).toBeLessThan(4);
+  });
+});
+
+describe("Lesen mit bekannter Länge (Sicherheitsaudit dos-1, Nachprüfung)", () => {
+  // Bei passendem Content-Length wird das Ergebnis einmal reserviert und gefüllt (halber
+  // Spitzenbedarf). Die Angabe stammt vom Server und kann falsch sein.
+  const content = (length: number) => Uint8Array.from({ length }, (_, i) => i & 0xff);
+  function chunkedBody(data: Uint8Array, declared: number): Response {
+    let offset = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= data.length) return controller.close();
+        controller.enqueue(data.slice(offset, offset + 700));
+        offset += 700;
+      },
+    });
+    return new Response(stream, { headers: { ETag: '"e"', "Content-Length": String(declared) } });
+  }
+
+  it("Content-Length stimmt: Inhalt unverändert (Sicherheitsaudit dos-1)", async () => {
+    const data = content(5000);
+    const { adapter } = fakeAdapter(() => chunkedBody(data, 5000), { maxFileBytes: 5000 });
+    const read = (await adapter.read())!.data;
+    expect(read).toEqual(data);
+    expect(read.buffer.byteLength).toBe(5000);
+  });
+
+  it("Content-Length zu klein: alles wird gelesen, die Obergrenze gilt weiter für die tatsächlichen Byte (Sicherheitsaudit dos-1)", async () => {
+    const data = content(5000);
+    const { adapter } = fakeAdapter(() => chunkedBody(data, 1000));
+    expect((await adapter.read())!.data).toEqual(data);
+    const { adapter: limited } = fakeAdapter(() => chunkedBody(data, 1000), { maxFileBytes: 4000 });
+    expect(String(await caught(limited.read()))).toMatch(/größer als 4000 Byte/);
+  });
+
+  it("Content-Length zu groß: nur die gelesenen Byte, ohne den Rest des Puffers (Sicherheitsaudit dos-1)", async () => {
+    const data = content(3000);
+    const { adapter } = fakeAdapter(() => chunkedBody(data, 9000));
+    const read = (await adapter.read())!.data;
+    expect(read).toEqual(data);
+    expect(read.buffer.byteLength).toBe(3000);
   });
 });
 

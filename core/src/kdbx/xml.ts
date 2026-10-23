@@ -25,9 +25,9 @@
  * einen FRISCHEN Strom erzeugen (createInnerStream); beim Speichern außerdem einen neuen
  * Schlüssel (newInnerStreamKey), siehe container.ts.
  */
-import type { ParseVaultXml, SerializeVaultXml } from "../contracts";
+import { KdbxError, type ParseVaultXml, type SerializeVaultXml } from "../contracts";
 import type { Entry, Group, Vault } from "../model";
-import { corrupt, utf8Encode } from "./bytes";
+import { utf8Encode } from "./bytes";
 import { MAX_XML_BYTES } from "./constants";
 import { KDBX_XML_LIMITS, findXmlLimitViolation, parseXml, serializeDocument } from "./xml-dom";
 import { decryptProtectedValues, encryptProtectedValues } from "./xml-protected";
@@ -38,8 +38,11 @@ import { BinaryPoolBuilder, buildVaultDocument } from "./xml-write";
 /** XML -> Modell (Vertrag ParseVaultXml in contracts.ts). */
 export const parseVaultXml: ParseVaultXml = (xml, binaries, stream, settings) => {
   // Vor dem Dekodieren: Als Text und erst recht als DOM von xmldom braucht die XML ein
-  // Vielfaches ihrer Größe an Speicher (Sicherheitsaudit dos-4).
-  if (xml.length > MAX_XML_BYTES) corrupt(`XML-Datenbank: XML ist zu groß (mehr als ${MAX_XML_BYTES / (1024 * 1024)} MiB).`);
+  // Vielfaches ihrer Größe an Speicher (Sicherheitsaudit dos-4). TooLarge statt Corrupt: Die
+  // Datei ist gültig, nur zu groß für Ownwarden.
+  if (xml.length > MAX_XML_BYTES) {
+    throw new KdbxError("TooLarge", `XML-Datenbank: zu groß für Ownwarden – die XML hat mehr als ${MAX_XML_BYTES / (1024 * 1024)} MiB.`);
+  }
   const document = parseXml(decodeUtf8Strict(xml, "XML-Datenbank"), "XML-Datenbank");
   const plaintexts = decryptProtectedValues(document, stream);
   return readVault(document, settings, { plaintexts, binaries });

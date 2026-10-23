@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ByteWriter, toHex, utf8Encode } from "./bytes";
+import { MAX_OUTER_HEADER_BYTES, MAX_VARIANT_DICTIONARY_ENTRIES } from "./constants";
 import {
   getBytes,
   getInteger,
@@ -105,6 +106,24 @@ describe("VariantDictionary", () => {
       ]),
     );
     expect(dict.get("P")).toEqual({ type: "uint32", value: 2 });
+  });
+
+  it("begrenzt Zahl der Einträge und Größe, bevor Einträge angelegt werden (Sicherheitsaudit dos-1, Nachprüfung)", () => {
+    // Winzige Einträge kosten im Speicher ein Vielfaches ihrer 10 Byte in der Datei.
+    const entries = (count: number) => Array.from({ length: count }, (_, i) => ({ type: 0x42, name: i.toString(36), value: new Uint8Array(0) }));
+    expect(parseVariantDictionary(rawDict(0x0100, entries(MAX_VARIANT_DICTIONARY_ENTRIES))).size).toBe(MAX_VARIANT_DICTIONARY_ENTRIES);
+    expect(() => parseVariantDictionary(rawDict(0x0100, entries(MAX_VARIANT_DICTIONARY_ENTRIES + 1)))).toThrow(corrupt);
+    expect(() => parseVariantDictionary(rawDict(0x0100, entries(MAX_VARIANT_DICTIONARY_ENTRIES + 1)))).toThrow(
+      `VariantDictionary: mehr als ${MAX_VARIANT_DICTIONARY_ENTRIES} Einträge.`,
+    );
+    // Größe: nie mehr als der ganze äußere Header – damit auch kein einzelner Eintrag
+    const header = MAX_OUTER_HEADER_BYTES;
+    const fits = rawDict(0x0100, [{ type: 0x42, name: "S", value: new Uint8Array(header - 2 - 1 - 4 - 1 - 4 - 1) }]);
+    expect(fits.length).toBe(header);
+    expect(parseVariantDictionary(fits).size).toBe(1);
+    const tooBig = rawDict(0x0100, [{ type: 0x42, name: "S", value: new Uint8Array(header) }]);
+    expect(() => parseVariantDictionary(tooBig)).toThrow(corrupt);
+    expect(() => parseVariantDictionary(tooBig)).toThrow(/unplausibel groß \(mehr als 64 KiB\)/);
   });
 
   it("getInteger nimmt jeden Ganzzahltyp, getBytes nur Byte-Arrays", () => {

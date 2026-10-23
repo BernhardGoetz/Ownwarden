@@ -24,7 +24,14 @@ export type KdbxErrorCode =
   | "UnsupportedKdf"
   | "UnsupportedInnerStream"
   | "InvalidCredentials" // Header-HMAC passt nicht: falsches Passwort/Schlüssel
-  | "Corrupt"; // Datei beschädigt (Block-HMAC, Länge, XML ...)
+  | "Corrupt" // Datei beschädigt (Block-HMAC, Länge, XML ...)
+  /**
+   * Datei ist gültig, überschreitet aber Ownwardens Grenzen (Inhalt über MAX_PAYLOAD_BYTES, XML
+   * über MAX_XML_BYTES oder mit zu vielen Bestandteilen, siehe kdbx/constants.ts und
+   * kdbx/xml-dom.ts). KeePassXC kann sie weiter öffnen. readKdbx meldet das erst nach der
+   * HMAC-Prüfung, die Datei stammt also von jemandem mit dem Schlüssel.
+   */
+  | "TooLarge";
 
 export class KdbxError extends Error {
   constructor(

@@ -177,6 +177,12 @@ function describeError(error: unknown): string {
   if (error instanceof KdbxError && error.code === "InvalidCredentials") {
     return "Falsches Master-Passwort (oder falsche Datei).";
   }
+  if (error instanceof KdbxError && error.code === "TooLarge") {
+    return (
+      `${error.message} Die Datei ist nicht beschädigt, aber größer, als Ownwarden sie verarbeitet. ` +
+      "KeePassXC öffnet sie weiterhin; dort bitte Verlauf, Papierkorb oder große Anhänge aufräumen."
+    );
+  }
   if (error instanceof ClockSkewError) {
     return `${error.message} Bitte Datum, Uhrzeit und Zeitzone des Geräts prüfen. Es wurde nichts geschrieben.`;
   }
