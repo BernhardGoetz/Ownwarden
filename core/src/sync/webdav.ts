@@ -17,6 +17,10 @@
  *     der Server so lange nicht antwortet bzw. beim Lesen so lange keine Daten kommen. Für das
  *     Hochladen eines Inhalts kommt die Zeit hinzu, die er bei MIN_UPLOAD_BYTES_PER_SECOND
  *     braucht (siehe TransferDeadline) – große Tresore scheitern so nicht an langsamen Leitungen.
+ *     Beim Herunterladen gilt dasselbe umgekehrt (Sicherheitsaudit dos-5): Das Lesen einer
+ *     Antwort darf höchstens timeoutMs plus die Zeit dauern, die die schon angekommenen Byte bei
+ *     MIN_DOWNLOAD_BYTES_PER_SECOND brauchen. Ein Server, der kurz vor jedem Zeitlimit ein Byte
+ *     schickt, hält eine Übertragung so nicht beliebig lange offen.
  *     Achtung Service Worker: Chrome beendet ihn, wenn eine Antwort länger als 30 s braucht.
  *     Das Zeitlimit gegen Stillstand bleibt darunter (DEFAULT_WEBDAV_TIMEOUT_MS), aber ein
  *     großer Upload auf langsamer Leitung kann trotzdem länger dauern; dann bricht der Abgleich
@@ -24,7 +28,13 @@
  *
  * Sicherheit:
  *   - Nur https://, außer http:// auf den eigenen Rechner (Testserver), siehe parseStorageUrl.
- *   - Passwort und Authorization-Header erscheinen in keiner Fehlermeldung.
+ *   - Anfragen (mit Zugangsdaten) gehen nur an den Server der Tresor-Datei; send() prüft das
+ *     für jede Anfrage und jedes COPY-Ziel (Sicherheitsaudit network-3).
+ *   - Antworten werden nur bis zu einer Obergrenze gelesen (MAX_VAULT_FILE_BYTES,
+ *     MAX_PROPFIND_BYTES; Sicherheitsaudit dos-1), gezählt nach dem Entpacken.
+ *   - Passwort und Authorization-Header erscheinen in keiner Fehlermeldung. Text vom Server
+ *     (Location, Parserfehler, Netzwerkfehler) erscheint nur über displayText (Sicherheitsaudit
+ *     leak-1).
  *   - Weiterleitungen werden NICHT verfolgt (redirect: "manual"): Sonst landeten Zugangsdaten
  *     und Tresor evtl. bei einer anderen Adresse, und ein PUT könnte unbemerkt woanders
  *     schreiben. Der Nutzer soll die endgültige Adresse eintragen.
@@ -44,6 +54,8 @@ import {
   type StorageAdapter,
   type WriteCondition,
 } from "../contracts";
+import { displayText } from "../display-text";
+import { MAX_PAYLOAD_BYTES } from "../kdbx/constants";
 import type { Millis } from "../model";
 import { backupFileName, backupsToDelete, backupVersionTag, parseBackupName } from "./backup-names";
 import {
@@ -77,6 +89,26 @@ export const DEFAULT_WEBDAV_TIMEOUT_MS = 25_000;
  */
 export const MIN_UPLOAD_BYTES_PER_SECOND = 16 * 1024;
 
+/**
+ * Mindestrate beim Herunterladen, wie beim Hochladen (Sicherheitsaudit dos-5, siehe
+ * Kopfkommentar). Ein 20-MB-Tresor darf bei dieser Rate etwa 21 Minuten brauchen.
+ */
+export const MIN_DOWNLOAD_BYTES_PER_SECOND = MIN_UPLOAD_BYTES_PER_SECOND;
+
+/**
+ * Obergrenze für die gelesene Tresor-Datei (Sicherheitsaudit dos-1): der größte Inhalt, den
+ * readKdbx annimmt (MAX_PAYLOAD_BYTES), plus 1 MiB für Header und Blockstruktur. Ohne Grenze
+ * könnte ein Server den Speicher füllen, bevor irgendein Schlüssel geprüft ist.
+ */
+export const MAX_VAULT_FILE_BYTES = MAX_PAYLOAD_BYTES + 1024 * 1024;
+
+/**
+ * Obergrenze für eine PROPFIND-Antwort (Sicherheitsaudit dos-1). Ein Eintrag braucht etwa ein
+ * halbes KiB; 4 MiB reichen für Tausende Sicherungskopien. Der XML-Parser braucht ein Vielfaches
+ * davon an Speicher.
+ */
+export const MAX_PROPFIND_BYTES = 4 * 1024 * 1024;
+
 export interface WebDavAdapterOptions {
   /** Vollständige Adresse der .kdbx-Datei, z. B. https://magentacloud.de/remote.php/webdav/Ownwarden/tresor.kdbx */
   fileUrl: string;
@@ -93,6 +125,12 @@ export interface WebDavAdapterOptions {
    * je nach Größe (MIN_UPLOAD_BYTES_PER_SECOND).
    */
   timeoutMs?: number;
+  /** Mindestrate beim Herunterladen in Byte/s (siehe Kopfkommentar); Standard MIN_DOWNLOAD_BYTES_PER_SECOND. */
+  minDownloadBytesPerSecond?: number;
+  /** Höchstens so viele Byte liest read() von der Tresor-Datei; Standard MAX_VAULT_FILE_BYTES. */
+  maxFileBytes?: number;
+  /** Höchstens so viele Byte einer PROPFIND-Antwort; Standard MAX_PROPFIND_BYTES. */
+  maxPropfindBytes?: number;
   /** Uhr für die Zeit im Namen der Sicherungskopien (Tests); Standard Date.now. */
   now?: () => Millis;
 }
@@ -122,6 +160,9 @@ export class WebDavAdapter implements StorageAdapter {
   readonly #deadlines = new WeakMap<Response, TransferDeadline>();
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly minDownloadBytesPerSecond: number;
+  private readonly maxFileBytes: number;
+  private readonly maxPropfindBytes: number;
   private readonly now: () => Millis;
 
   constructor(options: WebDavAdapterOptions) {
@@ -148,8 +189,10 @@ export class WebDavAdapter implements StorageAdapter {
     const customFetch = options.fetch;
     this.fetchFn = customFetch !== undefined ? (input, init) => customFetch(input, init) : (input, init) => globalThis.fetch(input, init);
 
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_WEBDAV_TIMEOUT_MS;
-    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new RangeError("timeoutMs muss eine positive Zahl sein.");
+    this.timeoutMs = positiveNumber(options.timeoutMs ?? DEFAULT_WEBDAV_TIMEOUT_MS, "timeoutMs");
+    this.minDownloadBytesPerSecond = positiveNumber(options.minDownloadBytesPerSecond ?? MIN_DOWNLOAD_BYTES_PER_SECOND, "minDownloadBytesPerSecond");
+    this.maxFileBytes = positiveNumber(options.maxFileBytes ?? MAX_VAULT_FILE_BYTES, "maxFileBytes");
+    this.maxPropfindBytes = positiveNumber(options.maxPropfindBytes ?? MAX_PROPFIND_BYTES, "maxPropfindBytes");
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -168,7 +211,7 @@ export class WebDavAdapter implements StorageAdapter {
       return null;
     }
     await this.expectSuccess(response, "Lesen der Tresor-Datei", this.fileUrl);
-    const data = await this.readBytes(response, this.fileUrl);
+    const data = await this.readBytes(response, this.fileUrl, this.maxFileBytes);
     const etag = headerValue(response.headers, "ETag");
     if (etag === null) return this.readWithEtagFromPropfind();
     return remoteFile(data, etag, response);
@@ -201,7 +244,7 @@ export class WebDavAdapter implements StorageAdapter {
         continue;
       }
       await this.expectSuccess(response, "Lesen der Tresor-Datei", this.fileUrl);
-      const data = await this.readBytes(response, this.fileUrl);
+      const data = await this.readBytes(response, this.fileUrl, this.maxFileBytes);
       if (before === null) return remoteFile(data, "", response);
 
       const after = await this.propfindEtag();
@@ -304,7 +347,7 @@ export class WebDavAdapter implements StorageAdapter {
     const start = this.now();
     for (let attempt = 0; attempt < BACKUP_NAME_ATTEMPTS; attempt++) {
       const name = backupFileName(this.fileName, start + attempt, current.etag);
-      const target = new URL(encodeURIComponent(name), this.backupFolderUrl);
+      const target = withPath(this.backupFolderUrl, this.backupFolderUrl.pathname + encodeURIComponent(name));
       const outcome = await this.copyFileTo(target);
       if (outcome === "copied") return name;
       if (outcome === "exists") continue;
@@ -425,7 +468,7 @@ export class WebDavAdapter implements StorageAdapter {
     const slash = path.lastIndexOf("/");
     const parent = path.slice(0, slash + 1);
     if (path.slice(slash + 1) === "" || decodePath(parent) !== decodePath(this.backupFolderUrl.pathname)) return null;
-    return new URL(path, this.backupFolderUrl.origin);
+    return withPath(this.backupFolderUrl, path);
   }
 
   // -------------------------------------------------------------------------
@@ -444,24 +487,34 @@ export class WebDavAdapter implements StorageAdapter {
       await this.discard(response);
       throw new StorageError(`PROPFIND ${describeUrl(url)}: unerwartete Antwort HTTP ${response.status} (erwartet 207 Multi-Status).`, response.status);
     }
-    const text = new TextDecoder().decode(await this.readBytes(response, url));
+    const text = new TextDecoder().decode(await this.readBytes(response, url, this.maxPropfindBytes));
     try {
       return parseMultistatus(text);
     } catch (error) {
-      throw new StorageError(`PROPFIND ${describeUrl(url)}: ${error instanceof Error ? error.message : String(error)}`);
+      // Die Meldung des Parsers kann einen Ausschnitt der Antwort enthalten (leak-1).
+      throw new StorageError(`PROPFIND ${describeUrl(url)}: ${displayText(errorText(error), 160)}`);
     }
   }
 
   /**
    * Eine Anfrage mit Anmeldung. Netzwerkfehler und Zeitüberschreitung werden zu StorageError.
    *
+   * Nur an den Server der Tresor-Datei (Sicherheitsaudit network-3): Liegt `url` oder das Ziel
+   * einer Kopie (Destination) woanders, wird nichts gesendet. Die Adressen werden so gebildet,
+   * dass das nie vorkommen sollte; dies ist die letzte Sperre vor den Zugangsdaten.
+   *
    * Zeitlimit (siehe Kopfkommentar): Bis die Antwort da ist, gilt timeoutMs plus die Zeit, die
    * der Inhalt `body` bei MIN_UPLOAD_BYTES_PER_SECOND zum Hochladen braucht. Danach läuft die
    * Frist weiter, bis der Körper gelesen (readBytes) oder verworfen (discard) ist; jedes beim
-   * Lesen ankommende Stück verlängert sie wieder um timeoutMs.
+   * Lesen ankommende Stück verlängert sie wieder um timeoutMs, höchstens bis zur Gesamtfrist
+   * aus MIN_DOWNLOAD_BYTES_PER_SECOND.
    */
   private async send(method: string, url: URL, headers: Record<string, string> = {}, body?: RequestBody): Promise<Response> {
     const allHeaders = new Headers(headers);
+    const destination = allHeaders.get("Destination");
+    if (url.origin !== this.fileUrl.origin || (destination !== null && !isSameOrigin(destination, this.fileUrl))) {
+      throw new StorageError(`${method} verweigert: Die Adresse liegt nicht auf dem Server der Tresor-Datei (${this.fileUrl.origin}).`);
+    }
     allHeaders.set("Authorization", this.#authorization);
     // Text-Körper sind nur die kurzen PROPFIND-Anfragen (ASCII): Zeichen = Bytes.
     const bodyBytes = body === undefined ? 0 : typeof body === "string" ? body.length : body.byteLength;
@@ -494,11 +547,28 @@ export class WebDavAdapter implements StorageAdapter {
   }
 
   /**
-   * Liest den Antwort-Körper Stück für Stück; jedes Stück verlängert die Frist (Zeitlimit gegen
-   * Stillstand, nicht für die ganze Übertragung). Ein Abbruch (Netz, Zeitlimit) wird zu StorageError.
+   * Liest den Antwort-Körper Stück für Stück, höchstens `maxBytes` (Sicherheitsaudit dos-1).
+   * Gezählt wird nach dem Entpacken: fetch entpackt Content-Encoding (gzip, br) selbst, wenige KiB
+   * auf der Leitung können so Gigabyte ergeben. "Accept-Encoding: identity" hilft dagegen nicht
+   * (fetch entpackt trotzdem, im Browser ist der Header gesperrt). Ein zu großes Content-Length
+   * wird gleich abgelehnt; sonst endet das Lesen, sobald mehr ankommt.
+   *
+   * Jedes Stück verlängert die Frist um timeoutMs (Zeitlimit gegen Stillstand), aber nie über die
+   * Gesamtfrist hinaus (dos-5): timeoutMs plus die Zeit, die die schon gelesenen Byte bei
+   * minDownloadBytesPerSecond brauchen. Ein Abbruch (Netz, Zeitlimit, Obergrenze) wird zu StorageError.
    */
-  private async readBytes(response: Response, url: URL): Promise<Uint8Array> {
+  private async readBytes(response: Response, url: URL, maxBytes: number): Promise<Uint8Array> {
     const deadline = this.#deadlines.get(response);
+    const aborted = (reason: string) => new StorageError(`Lesen von ${describeUrl(url)} abgebrochen (${reason}).`);
+    const tooLarge = `die Antwort des Servers ist größer als ${sizeText(maxBytes)}`;
+    const tooSlow = `Zeitüberschreitung: Die Daten kamen im Schnitt langsamer als ${sizeText(this.minDownloadBytesPerSecond)}/s`;
+    if (Number(response.headers.get("Content-Length")) > maxBytes) {
+      await this.discard(response);
+      throw aborted(tooLarge);
+    }
+    const started = Date.now();
+    /** true, wenn die laufende Frist die Gesamtfrist ist (nicht das Zeitlimit gegen Stillstand). */
+    let atOverallLimit = false;
     try {
       if (response.body === null) return new Uint8Array(await response.arrayBuffer());
       const reader = response.body.getReader();
@@ -507,9 +577,15 @@ export class WebDavAdapter implements StorageAdapter {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
         total += value.byteLength;
-        deadline?.restart(this.timeoutMs);
+        const remainingMs = started + this.timeoutMs + (total * 1000) / this.minDownloadBytesPerSecond - Date.now();
+        if (total > maxBytes || remainingMs <= 0) {
+          await reader.cancel().catch(() => undefined); // Übertragung beenden, den Rest nicht lesen
+          throw aborted(total > maxBytes ? tooLarge : tooSlow);
+        }
+        chunks.push(value);
+        atOverallLimit = remainingMs < this.timeoutMs;
+        deadline?.restart(Math.min(this.timeoutMs, remainingMs));
       }
       const data = new Uint8Array(total);
       let offset = 0;
@@ -519,8 +595,13 @@ export class WebDavAdapter implements StorageAdapter {
       }
       return data;
     } catch (error) {
-      const reason = deadline?.expired ? `Zeitüberschreitung: ${seconds(this.timeoutMs)} s lang keine Daten` : fetchFailureReason(error, this.#secrets);
-      throw new StorageError(`Lesen von ${describeUrl(url)} abgebrochen (${reason}).`);
+      if (error instanceof StorageError) throw error;
+      const reason = deadline?.expired
+        ? atOverallLimit
+          ? tooSlow
+          : `Zeitüberschreitung: ${seconds(this.timeoutMs)} s lang keine Daten`
+        : fetchFailureReason(error, this.#secrets);
+      throw aborted(reason);
     } finally {
       deadline?.stop();
     }
@@ -548,9 +629,10 @@ export class WebDavAdapter implements StorageAdapter {
       );
     }
     if (isRedirect(response)) {
+      // Location bestimmt der Server: nur entschärft und gekürzt in die Meldung (leak-1).
       const location = response.headers.get("Location");
       return new StorageError(
-        `${action}: Der Server leitet ${where} weiter${location !== null ? ` nach ${location}` : ""}. Bitte die endgültige Adresse eintragen.`,
+        `${action}: Der Server leitet ${where} weiter${location !== null ? ` nach ${displayText(location, 100)}` : ""}. Bitte die endgültige Adresse eintragen.`,
         response.status === 0 ? undefined : response.status,
       );
     }
@@ -603,6 +685,38 @@ class TransferDeadline {
 /** Millisekunden als ganze Sekunden (mindestens 1) für Meldungen. */
 function seconds(ms: number): number {
   return Math.max(1, Math.round(ms / 1000));
+}
+
+/** Größe für Meldungen: "4 MiB", "16 KiB" oder "1000 Byte". */
+function sizeText(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes} Byte`;
+}
+
+function positiveNumber(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new RangeError(`${name} muss eine positive Zahl sein.`);
+  return value;
+}
+
+/**
+ * Adresse auf dem Server von `base` mit dem Pfad `path` (Sicherheitsaudit network-3). Der Pfad
+ * wird gesetzt, nicht als relative Adresse aufgelöst: "//rechner/…" würde sonst zur Adresse eines
+ * anderen Rechners.
+ */
+function withPath(base: URL, path: string): URL {
+  const url = new URL(base.href);
+  url.pathname = path;
+  return url;
+}
+
+/** true, wenn `raw` eine absolute Adresse mit demselben Ursprung (Schema, Rechner, Port) wie `base` ist. */
+function isSameOrigin(raw: string, base: URL): boolean {
+  try {
+    return new URL(raw).origin === base.origin;
+  } catch {
+    return false;
+  }
 }
 
 /** Meldungstext eines Fehlers (die Meldungen dieses Adapters enthalten nie Zugangsdaten). */

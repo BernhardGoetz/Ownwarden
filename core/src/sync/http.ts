@@ -5,6 +5,7 @@
  * Läuft auch im Service Worker der Browser-Erweiterung: nur fetch, URL, Headers,
  * TextEncoder und btoa – keine Node-APIs.
  */
+import { displayText } from "../display-text";
 import type { Millis } from "../model";
 
 /** Rechnernamen, für die unverschlüsseltes http:// erlaubt ist (nur für Tests auf dem eigenen Rechner). */
@@ -22,7 +23,8 @@ export function isLoopbackHost(hostname: string): boolean {
  * http:// gingen Passwort (Basic-Auth) und Tresor-Datei im Klartext durchs Netz.
  * Zugangsdaten in der Adresse (https://name:pw@host/…) werden abgelehnt, weil die Adresse in
  * Meldungen auftaucht. Abfrage (?…) und Anker (#…) haben in einer WebDAV-Adresse nichts zu
- * suchen und würden das Ableiten von Ordner- und Backup-Adressen verfälschen.
+ * suchen und würden das Ableiten von Ordner- und Backup-Adressen verfälschen. Zum Pfad siehe
+ * hasPlainPath.
  *
  * @param label Bezeichnung für Fehlermeldungen, z. B. "Adresse der Tresor-Datei"
  */
@@ -42,7 +44,32 @@ export function parseStorageUrl(raw: string, label: string): URL {
   if (url.search !== "" || url.hash !== "") {
     throw new TypeError(`${label}: Die Adresse darf kein "?" und kein "#" enthalten.`);
   }
+  if (!hasPlainPath(raw, url)) {
+    throw new TypeError(
+      `${label}: Der Pfad darf keine leeren Abschnitte ("//"), keine Abschnitte "." oder "..", keinen "\\" und kein kodiertes "/" oder "\\" (%2F, %5C) enthalten.`,
+    );
+  }
   return url;
+}
+
+/**
+ * true, wenn der Pfad der Adresse schlicht ist (Sicherheitsaudit network-3): keine leeren
+ * Abschnitte ("//"), kein "\", kein kodiertes "/" oder "\" (%2F, %5C) und keine Abschnitte "."
+ * oder ".." (auch kodiert, z. B. "%2e%2e"). Beginnt ein Pfad mit "//", liest ein URL-Parser ihn
+ * als Adresse eines ANDEREN Rechners; die übrigen Formen führen über Umwege (Dekodieren, "\" als
+ * "/", Auflösen von "..") zum selben Ergebnis oder an eine andere Stelle als eingetragen.
+ * Nextcloud und MagentaCLOUD brauchen nichts davon.
+ *
+ * "\" und Punkt-Abschnitte löst der URL-Parser schon beim Lesen auf; dafür wird deshalb die
+ * Eingabe selbst geprüft (ohne Tabulatoren und Zeilenumbrüche, die der Parser ebenfalls entfernt).
+ */
+function hasPlainPath(raw: string, url: URL): boolean {
+  if (raw.includes("\\") || url.pathname.includes("//") || /%2f|%5c/i.test(url.pathname)) return false;
+  const input = raw.replace(/[\t\n\r]/g, "");
+  const pathStart = input.indexOf("/", input.indexOf("//") + 2);
+  if (pathStart < 0) return true;
+  const path = input.slice(pathStart).split(/[?#]/)[0]!;
+  return !path.split("/").some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment));
 }
 
 /** Die Adresse ohne Zugangsdaten, für Meldungen (Zugangsdaten sind ohnehin nie in der URL). */
@@ -109,7 +136,10 @@ export function bytesBody(data: Uint8Array): Uint8Array<ArrayBuffer> {
 /**
  * Kurzer, harmloser Grund aus einem fetch-Fehler (z. B. "ECONNREFUSED" oder "TimeoutError").
  * `secrets` werden zur Sicherheit aus dem Text entfernt – fetch nennt keine Header, aber
- * eine eingeschleuste fetch-Funktion (Tests, Erweiterung) könnte es tun.
+ * eine eingeschleuste fetch-Funktion (Tests, Erweiterung) könnte es tun. Der Fehlertext kann
+ * Teile der Server-Antwort enthalten; er erscheint deshalb nur über displayText (Sicherheitsaudit
+ * leak-1), und zwar erst nach dem Entfernen der Geheimnisse (sonst könnte das Kürzen eines
+ * zerschneiden).
  */
 export function fetchFailureReason(error: unknown, secrets: readonly string[]): string {
   const parts: string[] = [];
@@ -122,5 +152,5 @@ export function fetchFailureReason(error: unknown, secrets: readonly string[]): 
   }
   let text = parts.filter((part) => part !== "").join(": ");
   for (const secret of secrets) if (secret !== "") text = text.split(secret).join("***");
-  return text;
+  return displayText(text, 400);
 }
