@@ -197,3 +197,11 @@ export const HMAC_BLOCK_SIZE = 1024 * 1024;
  * Speicherüberlauf im Service Worker. 512 MiB reichen auch für Datenbanken mit Anhängen.
  */
 export const MAX_PAYLOAD_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Obergrenze für das XML-Dokument (UTF-8-Byte), bevor es dem XML-Parser übergeben wird
+ * (Sicherheitsaudit dos-4). Anhänge stehen nicht im XML, sondern im inneren Header; 16 MiB XML
+ * entsprechen Zehntausenden Einträgen. Der DOM-Parser braucht ein Vielfaches davon an
+ * Arbeitsspeicher, auf dem Handy und im Service Worker ist das die engere Grenze.
+ */
+export const MAX_XML_BYTES = 16 * 1024 * 1024;
