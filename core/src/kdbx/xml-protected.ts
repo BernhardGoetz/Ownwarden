@@ -29,6 +29,9 @@ import { utf8Encode, wipe } from "./bytes";
 import { childElements, plainText, type XmlElement } from "./xml-dom";
 import { decodeBase64, encodeBase64, isTrueAttribute } from "./xml-values";
 
+/** Ein einzelnes (ungepaartes) UTF-16-Surrogat. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /** true, wenn das Element einen mit dem inneren Strom verschlüsselten Wert enthält. */
 export function isProtectedElement(element: XmlElement): boolean {
   return isTrueAttribute(element.attributes.get("Protected"));
@@ -60,7 +63,12 @@ export function decryptProtectedValues(root: XmlElement, stream: InnerStreamCiph
 export function encryptProtectedValues(root: XmlElement, stream: InnerStreamCipher): void {
   forEachInDocumentOrder(root, (element) => {
     if (!isProtectedElement(element)) return true;
-    const plaintext = utf8Encode(plainText(element, `Geschützter Wert in <${element.name}>`));
+    const what = `Geschützter Wert in <${element.name}>`;
+    const text = plainText(element, what);
+    // UTF-8 kennt keine einzelnen Surrogate; TextEncoder machte still U+FFFD daraus. Ein
+    // Modellfehler (vault-ops lehnt das schon ab), also RangeError (Sicherheitsaudit xml-2).
+    if (LONE_SURROGATE.test(text)) throw new RangeError(`${what}: enthält ein einzelnes UTF-16-Surrogat, das UTF-8 nicht speichern kann.`);
+    const plaintext = utf8Encode(text);
     element.children = plaintext.length === 0 ? [] : [encodeBase64(stream.process(plaintext))];
     wipe(plaintext);
     // KeePass erkennt nur genau "True" (KeePassXC auch "true" oder "1").

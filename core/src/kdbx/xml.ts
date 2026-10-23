@@ -27,8 +27,9 @@
  */
 import type { ParseVaultXml, SerializeVaultXml } from "../contracts";
 import type { Entry, Group, Vault } from "../model";
-import { utf8Encode } from "./bytes";
-import { parseXml, serializeDocument } from "./xml-dom";
+import { corrupt, utf8Encode } from "./bytes";
+import { MAX_XML_BYTES } from "./constants";
+import { KDBX_XML_LIMITS, findXmlLimitViolation, parseXml, serializeDocument } from "./xml-dom";
 import { decryptProtectedValues, encryptProtectedValues } from "./xml-protected";
 import { readVault } from "./xml-read";
 import { decodeUtf8Strict } from "./xml-values";
@@ -36,6 +37,9 @@ import { BinaryPoolBuilder, buildVaultDocument } from "./xml-write";
 
 /** XML -> Modell (Vertrag ParseVaultXml in contracts.ts). */
 export const parseVaultXml: ParseVaultXml = (xml, binaries, stream, settings) => {
+  // Vor dem Dekodieren: Als Text und erst recht als DOM von xmldom braucht die XML ein
+  // Vielfaches ihrer Größe an Speicher (Sicherheitsaudit dos-4).
+  if (xml.length > MAX_XML_BYTES) corrupt(`XML-Datenbank: XML ist zu groß (mehr als ${MAX_XML_BYTES / (1024 * 1024)} MiB).`);
   const document = parseXml(decodeUtf8Strict(xml, "XML-Datenbank"), "XML-Datenbank");
   const plaintexts = decryptProtectedValues(document, stream);
   return readVault(document, settings, { plaintexts, binaries });
@@ -46,7 +50,12 @@ export const serializeVaultXml: SerializeVaultXml = (vault, stream) => {
   const pool = new BinaryPoolBuilder();
   const document = buildVaultDocument(vault, pool);
   encryptProtectedValues(document, stream);
-  return { xml: utf8Encode(serializeDocument(document)), binaries: pool.binaries() };
+  const text = serializeDocument(document);
+  // Was das Lesen ablehnen würde (zu tief, zu viele Bestandteile), gar nicht erst schreiben
+  // (Grundregel in xml-write.ts). Die Größe in Byte prüft container.ts mit eigener Meldung.
+  const problem = findXmlLimitViolation(text, { ...KDBX_XML_LIMITS, maxLength: Infinity });
+  if (problem !== undefined) throw new RangeError(`Modell: Die Datenbank ließe sich so nicht wieder einlesen (${problem}).`);
+  return { xml: utf8Encode(text), binaries: pool.binaries() };
 };
 
 /**

@@ -16,7 +16,9 @@
  * Browser-Erweiterung, braucht keine DOM-Globals).
  */
 import { DOMParser, type Node as DomNode } from "@xmldom/xmldom";
+import { displayText } from "../display-text";
 import { corrupt } from "./bytes";
+import { MAX_XML_BYTES } from "./constants";
 
 /** Ein XML-Element. Text-Inhalt steht als string in `children`. */
 export interface XmlElement {
@@ -36,6 +38,15 @@ export type XmlNode = XmlElement | string;
  * sonst den Aufrufstapel sprengen (RangeError statt einer sauberen Fehlermeldung).
  */
 export const MAX_XML_DEPTH = 1000;
+
+/**
+ * Höchstzahl der Bestandteile (Elemente, Attribute, Kommentare, Verarbeitungsanweisungen,
+ * CDATA) beim Einlesen (Sicherheitsaudit dos-4). xmldom braucht je Bestandteil rund 1 KB
+ * Speicher. Echte Dateien haben über 30 Byte je Bestandteil (16 MiB ≈ 500 000); dichtes XML
+ * wie "<a/><a/>…" schafft 4 Byte (gemessen: schon 8 MiB davon sprengen den Standard-Heap von
+ * Node mit 2 GB). Erlaubt sind im Schnitt 16 Byte je Bestandteil.
+ */
+export const MAX_XML_NODES = MAX_XML_BYTES / 16;
 
 // ---------------------------------------------------------------------------
 // Aufbauen
@@ -82,41 +93,256 @@ export function plainText(element: XmlElement, context: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Vorprüfung vor xmldom
+// ---------------------------------------------------------------------------
+
+/** Grenzen für findXmlLimitViolation. */
+export interface XmlLimits {
+  /** Höchstlänge des Textes in Zeichen (UTF-16-Einheiten; nie mehr als seine UTF-8-Bytes). */
+  maxLength: number;
+  /** Höchstzahl ineinander geschachtelter Elemente; das Wurzelelement ist Ebene 1. */
+  maxDepth: number;
+  /**
+   * Höchstzahl der Namensraum-Deklarationen (xmlns="…", xmlns:p="…"), die gleichzeitig gelten:
+   * die des Elements selbst und die aller seiner Vorfahren. 0 = gar keine.
+   */
+  maxNamespaceDeclarations: number;
+  /**
+   * Höchstzahl der Bestandteile, für die xmldom je ein Objekt anlegt: Elemente, Attribute,
+   * Kommentare, Verarbeitungsanweisungen, CDATA. Textstücke stehen nur dazwischen, es gibt
+   * also höchstens einen mehr; sie zählen nicht extra.
+   */
+  maxNodes: number;
+}
+
+/** Grenzen für KDBX: Die Datenbank-XML benutzt nie Namensräume (Sicherheitsaudit xml-4, xml-5). */
+export const KDBX_XML_LIMITS: Readonly<XmlLimits> = {
+  maxLength: MAX_XML_BYTES,
+  maxDepth: MAX_XML_DEPTH,
+  maxNamespaceDeclarations: 0,
+  maxNodes: MAX_XML_NODES,
+};
+
+/** Abschnitte, in denen "<" und ">" nichts bedeuten: Verarbeitungsanweisung, Kommentar, CDATA. */
+const SKIPPED_SECTIONS: readonly (readonly [opening: string, closing: string])[] = [
+  ["<?", "?>"],
+  ["<!--", "-->"],
+  ["<![CDATA[", "]]>"],
+];
+
+/**
+ * Prüft XML-Text in EINEM Durchgang (lineare Zeit), BEVOR xmldom ihn einliest
+ * (Sicherheitsaudit xml-1, dos-4): Größe, Verschachtelungstiefe, Namensraum-Deklarationen und
+ * Zahl der Bestandteile.
+ *
+ * Warum vorher? xmldom legt für jedes Element, das einen Namensraum deklariert, eine weitere
+ * Stufe einer Prototyp-Kette an und sucht jeden Namensraum durch diese Kette. N verschachtelte
+ * Elemente mit xmlns kosten dadurch N²: 40 000 Ebenen (0,75 MB) blockieren über 30 Sekunden.
+ * Und jeder Bestandteil kostet xmldom rund 1 KB Speicher. Eine Prüfung NACH xmldom kommt für
+ * beides zu spät.
+ *
+ * Zerlegt wird nur so weit, wie das Zählen es braucht: Start- und End-Tags, Kommentare, CDATA,
+ * Verarbeitungsanweisungen und Attributwerte in Anführungszeichen (dort zählen "<" und ">"
+ * nicht). Was xmldom womöglich ANDERS zerlegen würde (Attribut ohne Anführungszeichen oder ohne
+ * Wert, Steuerzeichen als Trenner im Tag, "<!" außer Kommentar und CDATA …), gilt als ungültig.
+ * So kann xmldom nie mehr Ebenen oder Deklarationen sehen als hier gezählt. Ob das XML sonst
+ * wohlgeformt ist, entscheidet danach xmldom.
+ *
+ * @returns das Problem (deutsch, ohne Inhalt aus dem Text) oder undefined
+ */
+export function findXmlLimitViolation(text: string, limits: XmlLimits): string | undefined {
+  if (text.length > limits.maxLength) return `XML ist zu groß (mehr als ${formatLength(limits.maxLength)})`;
+  /** Je offenes Element: Zahl seiner eigenen Namensraum-Deklarationen. */
+  const open: number[] = [];
+  let declarations = 0;
+  let nodes = 0;
+  let pos = 0;
+  for (;;) {
+    const tagStart = text.indexOf("<", pos);
+    if (tagStart < 0) return undefined;
+    const next = text[tagStart + 1];
+    if (next === "/") {
+      // End-Tag: wie bei xmldom bis zum nächsten ">".
+      const end = text.indexOf(">", tagStart + 2);
+      if (end < 0 || open.length === 0) return invalidMarkup(tagStart);
+      declarations -= open.pop()!;
+      pos = end + 1;
+    } else if (next === "?" || next === "!") {
+      const section = SKIPPED_SECTIONS.find(([opening]) => text.startsWith(opening, tagStart));
+      if (section === undefined) return invalidMarkup(tagStart); // z. B. <!ELEMENT oder <![IGNORE[
+      const end = text.indexOf(section[1], tagStart + section[0].length);
+      if (end < 0) return invalidMarkup(tagStart);
+      if (++nodes > limits.maxNodes) return tooManyNodes(limits.maxNodes);
+      pos = end + section[1].length;
+    } else {
+      const tag = scanStartTag(text, tagStart + 1);
+      if (tag === undefined) return invalidMarkup(tagStart);
+      nodes += 1 + tag.attributes;
+      if (nodes > limits.maxNodes) return tooManyNodes(limits.maxNodes);
+      if (open.length + 1 > limits.maxDepth) return `XML ist zu tief verschachtelt (mehr als ${limits.maxDepth} Ebenen)`;
+      if (declarations + tag.declarations > limits.maxNamespaceDeclarations) {
+        return limits.maxNamespaceDeclarations === 0
+          ? "Namensraum-Deklarationen (xmlns) sind nicht erlaubt"
+          : `zu viele Namensraum-Deklarationen (mehr als ${limits.maxNamespaceDeclarations} gleichzeitig gültige)`;
+      }
+      if (!tag.selfClosing) {
+        open.push(tag.declarations);
+        declarations += tag.declarations;
+      }
+      pos = tag.end;
+    }
+  }
+}
+
+/**
+ * Liest ein Start-Tag ab `start` (gleich hinter "<"): Name, dann Attribute der Form
+ * Name="Wert" oder Name='Wert' (Leerraum um "=" erlaubt), dann ">" oder "/>".
+ * Alles andere ergibt undefined.
+ */
+function scanStartTag(
+  text: string,
+  start: number,
+): { end: number; attributes: number; declarations: number; selfClosing: boolean } | undefined {
+  let p = skipName(text, start);
+  if (p === start) return undefined;
+  let attributes = 0;
+  let declarations = 0;
+  for (;;) {
+    p = skipSpace(text, p);
+    if (text[p] === ">") return { end: p + 1, attributes, declarations, selfClosing: false };
+    if (text[p] === "/") return text[p + 1] === ">" ? { end: p + 2, attributes, declarations, selfClosing: true } : undefined;
+    const nameStart = p;
+    p = skipName(text, p);
+    if (p === nameStart) return undefined;
+    attributes++;
+    // Genau die Attribute, die xmldom als Deklaration behandelt: "xmlns" und "xmlns:…".
+    const name = text.slice(nameStart, p);
+    if (name === "xmlns" || name.startsWith("xmlns:")) declarations++;
+    p = skipSpace(text, p);
+    if (text[p] !== "=") return undefined;
+    p = skipSpace(text, p + 1);
+    const quote = text[p];
+    if (quote !== '"' && quote !== "'") return undefined;
+    const close = text.indexOf(quote, p + 1);
+    if (close < 0) return undefined;
+    p = close + 1;
+  }
+}
+
+/** Leerraum in Tags: nur die vier Zeichen, die XML 1.0 dafür vorsieht. */
+function skipSpace(text: string, p: number): number {
+  while (p < text.length) {
+    const code = text.charCodeAt(p);
+    if (code !== 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) break;
+    p++;
+  }
+  return p;
+}
+
+/**
+ * Überspringt einen Element- oder Attributnamen. Er endet an Leerraum, < > / = " ' und an
+ * Zeichen, die xmldom (anders als XML 1.0) als Leerraum behandelt: alle Steuerzeichen bis
+ * U+0020, U+0080 und – nach seiner Umwandlung von Zeilenenden – U+0085, U+2028, U+2029. An
+ * Letzteren lehnt der Aufrufer ab, weil kein Leerraum, "=" oder Tag-Ende folgt.
+ */
+function skipName(text: string, p: number): number {
+  while (p < text.length) {
+    const code = text.charCodeAt(p);
+    const stop =
+      code <= 0x20 ||
+      code === 0x3c || // <
+      code === 0x3e || // >
+      code === 0x2f || // /
+      code === 0x3d || // =
+      code === 0x22 || // "
+      code === 0x27 || // '
+      code === 0x80 ||
+      code === 0x85 ||
+      code === 0x2028 ||
+      code === 0x2029;
+    if (stop) break;
+    p++;
+  }
+  return p;
+}
+
+function invalidMarkup(position: number): string {
+  return `kein gültiges XML (fehlerhaftes Markup an Position ${position})`;
+}
+
+function tooManyNodes(maxNodes: number): string {
+  return `XML hat zu viele Bestandteile (mehr als ${maxNodes} Elemente, Attribute, Kommentare usw.)`;
+}
+
+/** 16777216 -> "16 MiB", 1000 -> "1000 Zeichen". */
+function formatLength(length: number): string {
+  const MIB = 1024 * 1024;
+  return length % MIB === 0 ? `${length / MIB} MiB` : `${length} Zeichen`;
+}
+
+// ---------------------------------------------------------------------------
 // Einlesen
 // ---------------------------------------------------------------------------
+
+/** Optionen für parseXml. */
+export interface ParseXmlOptions {
+  /**
+   * true = in XML 1.0 verbotene Zeichen (als Zeichenreferenz wie &#1;) durchlassen. Nur für
+   * unbekannte Elemente AUS DEM MODELL: Dort stehen geschützte Werte im Klartext, auch mit
+   * Steuerzeichen (siehe serializeElement). In einer Datei sind sie immer ein Fehler.
+   */
+  allowInvalidChars?: boolean;
+}
+
+/** Anfang der Warnung von xmldom, wenn der Text U+FFFD enthält (ein erlaubtes Zeichen). */
+const REPLACEMENT_CHARACTER_WARNING = "Unicode replacement character detected";
 
 /**
  * Liest XML-Text sicher ein und liefert das Wurzelelement.
  *
- * Sicherheit: Dokumente mit DOCTYPE oder ENTITY-Deklaration werden abgelehnt (Schutz vor
- * XXE und „Billion Laughs“). KDBX-Dateien enthalten nie eine DTD.
+ * Sicherheit:
+ *   - Dokumente mit DOCTYPE oder ENTITY-Deklaration werden abgelehnt (Schutz vor XXE und
+ *     „Billion Laughs“). KDBX-Dateien enthalten nie eine DTD.
+ *   - Größe, Tiefe, Namensräume und Zahl der Bestandteile prüft findXmlLimitViolation,
+ *     bevor xmldom läuft (Sicherheitsaudit xml-1, dos-4).
+ *   - KDBX benutzt keine Namensräume: Deklarationen und Namen mit Präfix (p:Entry, xml:space)
+ *     sind ein Fehler. KeePassXC vergleicht nur den lokalen Namen und läse <p:Entry> als
+ *     Eintrag, Ownwarden sähe ein unbekanntes Element (Sicherheitsaudit xml-4, xml-5).
+ *   - In XML 1.0 verbotene Zeichen (auch als &#1;) sind ein Fehler, wie bei KeePassXC
+ *     (Sicherheitsaudit xml-2), außer mit `allowInvalidChars`.
  *
  * @param context Name des Inhalts für Fehlermeldungen (z. B. "XML-Datenbank")
  */
-export function parseXml(text: string, context: string): XmlElement {
+export function parseXml(text: string, context: string, options: ParseXmlOptions = {}): XmlElement {
   if (/<!DOCTYPE|<!ENTITY/i.test(text)) {
     corrupt(`${context}: DOCTYPE- und ENTITY-Deklarationen sind nicht erlaubt.`);
   }
+  const problem = findXmlLimitViolation(text, KDBX_XML_LIMITS);
+  if (problem !== undefined) corrupt(`${context}: ${problem}.`);
+  let reason: string | undefined;
   const parser = new DOMParser({
     locator: false,
     normalizeLineEndings: normalizeXml10LineEndings,
-    // Warnungen sind harmlos; Fehler brechen das Einlesen ab (sonst würde xmldom
-    // stillschweigend weiterraten, was mit kaputtem XML gemeint sein könnte).
+    // Jede Meldung bricht ab, auch eine Warnung: Mit Warnungen „repariert“ xmldom nachlässige
+    // Syntax (Attributwert ohne Anführungszeichen, fehlender Leerraum …), die KeePassXC ablehnt
+    // (Sicherheitsaudit xml-5). Einzige Ausnahme: der Hinweis auf U+FFFD im Text.
     onError: (level, message) => {
-      if (level !== "warning") throw new Error(message);
+      if (level === "warning" && message.startsWith(REPLACEMENT_CHARACTER_WARNING)) return;
+      reason ??= message;
+      throw new Error(message);
     },
   });
   let documentElement: DomNode | null;
   try {
     documentElement = parser.parseFromString(text, "text/xml").documentElement;
   } catch (error) {
-    // Die Meldung des Parsers enthält nur Positionen und Elementnamen, keine Werte
-    // geschützter Felder (die stehen in der Datei ohnehin nur verschlüsselt).
-    const reason = error instanceof Error ? error.message.split("\n")[0] : String(error);
-    corrupt(`${context}: kein gültiges XML (${reason}).`);
+    // Die Meldung von xmldom zitiert Stücke des Textes (in einer Datei nie geschützte Werte, die
+    // stehen dort nur verschlüsselt): entschärft und gekürzt weitergeben (Sicherheitsaudit leak-1).
+    const message = reason ?? (error instanceof Error ? error.message : String(error));
+    corrupt(`${context}: kein gültiges XML (${displayText(message.split("\n")[0]!)}).`);
   }
   if (documentElement === null) corrupt(`${context}: kein Wurzelelement.`);
-  return convertDomElement(documentElement, 0, context);
+  return convertDomElement(documentElement, 0, context, options.allowInvalidChars === true);
 }
 
 /**
@@ -136,27 +362,39 @@ const DOM_TEXT_NODE = 3;
 const DOM_CDATA_SECTION_NODE = 4;
 
 /** Wandelt ein xmldom-Element (rekursiv) in den eigenen Baum um. */
-function convertDomElement(node: DomNode, depth: number, context: string): XmlElement {
+function convertDomElement(node: DomNode, depth: number, context: string, allowInvalidChars: boolean): XmlElement {
+  // Die Vorprüfung lehnt zu Tiefes schon vor xmldom ab; das hier schützt nur den Aufrufstapel.
   if (depth > MAX_XML_DEPTH) corrupt(`${context}: XML ist zu tief verschachtelt (mehr als ${MAX_XML_DEPTH} Ebenen).`);
   const domElement = node as unknown as {
     nodeName: string;
     attributes: { length: number; item(index: number): { name: string; value: string } | null };
   };
+  const name = domElement.nodeName;
+  // Namensraum-Deklarationen lehnt schon die Vorprüfung ab; übrig bleibt das vordefinierte
+  // Präfix xml: (z. B. <xml:x>, xml:space="preserve").
+  if (name.includes(":")) corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (<${name}>).`);
 
   const attributes = new Map<string, string>();
   for (let i = 0; i < domElement.attributes.length; i++) {
     const attribute = domElement.attributes.item(i);
-    if (attribute) attributes.set(attribute.name, attribute.value);
+    if (!attribute) continue;
+    if (attribute.name.includes(":")) corrupt(`${context}: Namensraum-Präfixe sind nicht erlaubt (${attribute.name} in <${name}>).`);
+    const invalid = allowInvalidChars ? undefined : findInvalidXmlChar(attribute.value);
+    if (invalid !== undefined) corrupt(`${context}: Attribut ${attribute.name} in <${name}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
+    attributes.set(attribute.name, attribute.value);
   }
 
   const children: XmlNode[] = [];
   // firstChild/nextSibling statt childNodes.item(i): bei xmldom deutlich schneller.
   for (let child = node.firstChild; child !== null; child = child.nextSibling) {
     if (child.nodeType === DOM_ELEMENT_NODE) {
-      children.push(convertDomElement(child, depth + 1, context));
+      children.push(convertDomElement(child, depth + 1, context, allowInvalidChars));
     } else if (child.nodeType === DOM_TEXT_NODE || child.nodeType === DOM_CDATA_SECTION_NODE) {
       // Benachbarte Textstücke (z. B. Text + CDATA) zu einem String zusammenfassen.
       const data = (child as unknown as { data: string }).data;
+      // xmldom prüft die Zeichen nicht; geprüft wird der Text NACH dem Auflösen von &#…;.
+      const invalid = allowInvalidChars ? undefined : findInvalidXmlChar(data);
+      if (invalid !== undefined) corrupt(`${context}: <${name}> enthält ein in XML 1.0 ungültiges Zeichen (${invalid}).`);
       const last = children[children.length - 1];
       if (typeof last === "string") children[children.length - 1] = last + data;
       else children.push(data);
@@ -164,7 +402,7 @@ function convertDomElement(node: DomNode, depth: number, context: string): XmlEl
     // Kommentare und Verarbeitungsanweisungen werden verworfen (KeePassXC tut dasselbe).
   }
 
-  return { name: domElement.nodeName, attributes, children: dropFormattingWhitespace(children) };
+  return { name, attributes, children: dropFormattingWhitespace(children) };
 }
 
 /**
@@ -202,12 +440,12 @@ export function serializeDocument(root: XmlElement): string {
  * Gibt ein Element kompakt (ohne Einrückung) aus – so werden unbekannte Elemente im MODELL
  * gespeichert (model.unknown), nicht in der Datei.
  *
- * Anders als beim Schreiben der Datei werden in XML ungültige Zeichen hier NICHT entfernt,
- * sondern als Zeichenreferenz (&#1;) aufbewahrt. Grund: Geschützte Werte in unbekannten
+ * Anders als beim Schreiben der Datei sind in XML ungültige Zeichen hier KEIN Fehler, sondern
+ * werden als Zeichenreferenz (&#1;) aufbewahrt. Grund: Geschützte Werte in unbekannten
  * Elementen stehen im Modell im Klartext; ein Passwort mit Steuerzeichen ginge sonst
- * verloren, obwohl es in der Datei als Base64 problemlos Platz hat. Das Einlesen mit
- * xmldom (parseXml) versteht diese Referenzen; in die Datei gelangen sie nie (dort werden
- * ungeschützte Werte bereinigt, geschützte stehen als Base64).
+ * verloren, obwohl es in der Datei als Base64 problemlos Platz hat. parseXml liest diese
+ * Referenzen mit `allowInvalidChars`; in die Datei gelangen sie nie (geschützte Werte stehen
+ * dort als Base64, ungeschützte mit solchen Zeichen lehnt escapeText ab).
  */
 export function serializeElement(element: XmlElement): string {
   return compact(element, MODEL_ESCAPING);
@@ -246,7 +484,7 @@ interface Escaping {
   attribute(text: string): string;
 }
 
-/** Für die Datei: ungültige Zeichen entfernen (wie KeePassXC). */
+/** Für die Datei: ungültige Zeichen sind ein Fehler (siehe requireValidXmlChars). */
 const FILE_ESCAPING: Escaping = { text: escapeText, attribute: escapeAttribute };
 
 /** Für model.unknown: ungültige Zeichen als Zeichenreferenz aufbewahren (siehe serializeElement). */
@@ -273,30 +511,55 @@ function startTag(element: XmlElement, selfClosing: boolean, escaping: Escaping)
 /**
  * Zeichen, die in XML 1.0 gar nicht vorkommen dürfen (auch nicht als &#…;): Steuerzeichen
  * außer Tab/LF/CR, U+FFFE, U+FFFF und einzelne (ungepaarte) UTF-16-Surrogate. KeePassXC
- * entfernt sie beim Schreiben ebenfalls und lehnt beim Lesen sogar &#1; ab (getestet mit
- * 2.7.6); in der DATEI dürfen sie also nie stehen. Geschützte Werte sind davon nicht
- * betroffen: Sie stehen als Base64 in der Datei (und im Modell als Zeichenreferenz, siehe
- * serializeElement – xmldom ist dort nachsichtiger als KeePassXC).
+ * entfernt sie beim Schreiben und lehnt beim Lesen sogar &#1; ab (getestet mit 2.7.6); in der
+ * DATEI dürfen sie also nie stehen. Ownwarden lehnt sie beim Lesen ab (KdbxError "Corrupt")
+ * und beim Schreiben ebenfalls (RangeError) – entfernen hieße, Daten still zu verändern
+ * (Sicherheitsaudit xml-2). Geschützte Werte sind davon nicht betroffen: Sie stehen als Base64
+ * in der Datei (und im Modell als Zeichenreferenz, siehe serializeElement).
  */
 const INVALID_XML_CHARS =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/** Wie INVALID_XML_CHARS, aber ohne "g" (exec/test ohne lastIndex-Zustand). */
+const INVALID_XML_CHAR = new RegExp(INVALID_XML_CHARS.source);
 
+/** Entfernt die verbotenen Zeichen (nur zum Prüfen, z. B. in index.ts; der Writer entfernt nichts). */
 export function stripInvalidXmlChars(text: string): string {
   return text.replace(INVALID_XML_CHARS, "");
+}
+
+/** Das erste in XML 1.0 verbotene Zeichen als "U+000B" oder undefined. */
+function findInvalidXmlChar(text: string): string | undefined {
+  const match = INVALID_XML_CHAR.exec(text);
+  return match === null ? undefined : `U+${match[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+/**
+ * Wirft einen RangeError, wenn `text` ein in XML 1.0 verbotenes Zeichen enthält. Die Datei
+ * kann es nicht speichern; es still zu entfernen hieße, das Modell zu verändern, ohne dass es
+ * jemand merkt (Sicherheitsaudit xml-2). vault-ops lehnt solche Eingaben schon vorher ab.
+ *
+ * @param what was geprüft wird, für die Fehlermeldung (z. B. "Eintrag …: Feldname")
+ */
+export function requireValidXmlChars(text: string, what: string): void {
+  const invalid = findInvalidXmlChar(text);
+  if (invalid !== undefined) throw new RangeError(`${what} enthält ein Zeichen, das XML nicht speichern kann (${invalid}).`);
 }
 
 /**
  * Text maskieren wie KeePassXC (& < > " als Entity). Zusätzlich wird "\r" als &#13;
  * geschrieben, weil ein XML-Parser ein rohes "\r" beim Lesen in "\n" verwandeln würde –
  * Windows-Zeilenenden in Notizen blieben sonst nicht erhalten (KeePassXC verliert sie).
+ * Verbotene Zeichen: RangeError (requireValidXmlChars).
  */
 export function escapeText(text: string): string {
-  return stripInvalidXmlChars(text).replace(/[&<>"\r]/g, (c) => TEXT_ESCAPES[c]!);
+  requireValidXmlChars(text, "Modell: Text");
+  return text.replace(/[&<>"\r]/g, (c) => TEXT_ESCAPES[c]!);
 }
 
 /** Attributwert maskieren (in doppelten Anführungszeichen; Leerraum als Zeichenreferenz). */
 export function escapeAttribute(text: string): string {
-  return stripInvalidXmlChars(text).replace(/[&<>"\t\n\r]/g, (c) => ATTRIBUTE_ESCAPES[c]!);
+  requireValidXmlChars(text, "Modell: Attributwert");
+  return text.replace(/[&<>"\t\n\r]/g, (c) => ATTRIBUTE_ESCAPES[c]!);
 }
 
 const TEXT_ESCAPES: Record<string, string> = {

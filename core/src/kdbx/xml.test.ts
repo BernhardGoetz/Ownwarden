@@ -420,7 +420,9 @@ describe("Modell -> XML -> Modell", () => {
     expect(() => serializeVaultXml(withTimes, identityStream())).toThrow(/<Times> gehört nicht/);
     const broken = sampleVault(false);
     broken.meta.unknown.push("<kaputt>");
-    expect(() => serializeVaultXml(broken, identityStream())).toThrow(corrupt);
+    // Ein Modellfehler, keine kaputte Datei: Error, aber kein KdbxError (Sicherheitsaudit xml-4).
+    expect(() => serializeVaultXml(broken, identityStream())).toThrow(/Modell: unbekanntes XML-Element: kein gültiges XML/);
+    expect(() => serializeVaultXml(broken, identityStream())).not.toThrow(corrupt);
   });
 
   it("verändert das Modell nicht und schreibt bei gleichem Strom identisch", () => {

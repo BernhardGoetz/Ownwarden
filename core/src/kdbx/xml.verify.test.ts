@@ -7,9 +7,11 @@
 import { describe, expect, it } from "vitest";
 import { ReferenceStream, decryptProtectedText, encryptProtectedText, identityStream, sampleVault, testUuid } from "../../test/fixtures/xml/fixtures";
 import { KdbxError, type InnerStreamCipher, type PoolBinary } from "../contracts";
-import { NULL_UUID, type Entry, type KdbxSettings, type Vault } from "../model";
+import { NULL_UUID, type Entry, type Group, type KdbxSettings, type Vault } from "../model";
 import { utf8Decode, utf8Encode } from "./bytes";
+import { MAX_XML_BYTES } from "./constants";
 import { kdbxMinorVersionRequired, parseVaultXml, serializeVaultXml } from "./xml";
+import { MAX_XML_DEPTH } from "./xml-dom";
 
 const corrupt = expect.objectContaining({ name: "KdbxError", code: "Corrupt" });
 
@@ -109,7 +111,9 @@ describe("Unbekannte Elemente: Reihenfolge und Inhalt", () => {
   });
 
   it("schreibt KEINE ungültigen XML-Zeichen in die Datei (auch nicht aus unbekannten Elementen)", () => {
-    const xml = doc({ meta: `<PluginData><Plain>x&#1;y</Plain><Secret Protected="True">${b64("\u0001")}</Secret></PluginData>` });
+    // Ungeschützter Text mit &#1; wird schon beim Lesen abgelehnt (Sicherheitsaudit xml-2) und
+    // beim Schreiben ebenfalls (siehe „Schreiben verändert das Modell nie still“).
+    const xml = doc({ meta: `<PluginData><Plain>xy</Plain><Secret Protected="True">${b64("\u0001")}</Secret></PluginData>` });
     const out = utf8Decode(serializeVaultXml(parse(xml), identityStream()).xml);
     expect(out).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f￾￿]|&#(0*[0-8]|0*1[1-2]|0*1[4-9]|0*2\d|0*3[01]|65534|65535);|&#x0*([0-8bcef]|1[0-9a-f]|fff[ef]);/i);
   });
@@ -402,6 +406,19 @@ describe("Schreiben erzeugt nie eine Datei, die das Lesen ablehnt", () => {
     ["Null-UUID bei einem Icon", (v) => (v.meta.customIcons[0]!.uuid = NULL_UUID)],
     ["Null-UUID bei einem Lösch-Vermerk", (v) => (v.deletedObjects[0]!.uuid = NULL_UUID)],
     ["Eintrag mit Verlauf im Verlauf (wird nicht geschrieben)", (v) => v.root.entries[0]!.history[0]!.history.push(minimalEntry(10))],
+    [
+      "Gruppen tiefer verschachtelt, als der Leser erlaubt (Sicherheitsaudit xml-1)",
+      (v) => {
+        let parent = v.root;
+        for (let i = 0; i < MAX_XML_DEPTH; i++) {
+          const uuid = Buffer.alloc(16, 0x5a);
+          uuid.writeUInt32BE(i);
+          const child: Group = { ...v.root.groups[1]!, uuid: uuid.toString("base64"), groups: [], entries: [], unknown: [] };
+          parent.groups.push(child);
+          parent = child;
+        }
+      },
+    ],
   ];
 
   it.each(cases)("%s", (_name, mutate) => {
@@ -436,5 +453,109 @@ describe("KDBX 4.0 und 4.1", () => {
     expect(vault.root.tags).toEqual(["a"]);
     expect(vault.root.entries[0]!.qualityCheck).toBe(false);
     expect(kdbxMinorVersionRequired(vault)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sicherheitsaudit: verbotene Zeichen, Namensräume, Größe
+// ---------------------------------------------------------------------------
+
+/** Schreibt das Modell; erwartet einen Modellfehler (RangeError/Error, nie KdbxError). */
+function expectRejectedOnWrite(vault: Vault, label: string): void {
+  let error: unknown;
+  try {
+    serializeVaultXml(vault, identityStream());
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error, label).toBeInstanceOf(Error);
+  expect(error, label).not.toBeInstanceOf(KdbxError);
+}
+
+describe("In XML 1.0 verbotene Zeichen werden nie still verändert (Sicherheitsaudit xml-2)", () => {
+  it.each([
+    ["rohes U+000B in ungeschützten Notizen", doc({ group: "<Notes>a\u000Bb</Notes>" })],
+    ["&#1; in ungeschützten Notizen", doc({ group: "<Notes>a&#1;b</Notes>" })],
+    ["&#xFFFE; in einem Feld", doc({ group: `<Entry><UUID>${testUuid(10)}</UUID><String><Key>Title</Key><Value>&#xFFFE;</Value></String></Entry>` })],
+    [
+      "CustomData-Schlüssel, die erst ohne &#1; gleich wären",
+      doc({ group: "<CustomData><Item><Key>K</Key><Value>a</Value></Item><Item><Key>K&#1;</Key><Value>b</Value></Item></CustomData>" }),
+    ],
+    ["&#1; in ungeschütztem Text eines unbekannten Elements", doc({ meta: "<PluginData><Plain>x&#1;y</Plain></PluginData>" })],
+    ["&#xD800; in einem Attribut eines unbekannten Elements", doc({ meta: '<PluginData a="&#xD800;"/>' })],
+  ])("Lesen lehnt ab wie KeePassXC: %s", (_name, xml) => {
+    expect(() => parse(xml)).toThrow(corrupt);
+    expect(() => parse(xml)).toThrow(/ungültiges Zeichen/);
+  });
+
+  const writeCases: [string, (vault: Vault) => void][] = [
+    ["ungeschützte Notizen mit U+000B", (v) => v.root.entries[0]!.strings.set("Notes", { value: "Zeile1\u000BZeile2", protected: false })],
+    ["Feldname mit U+0001", (v) => v.root.entries[0]!.strings.set("PIN\u0001", { value: "1", protected: false })],
+    [
+      "CustomData-Schlüssel, die erst ohne U+0001 gleich wären",
+      (v) => v.root.entries[0]!.customData.set("Typ\u0001", { value: "anders" }),
+    ],
+    ["CustomData-Wert mit U+0002", (v) => v.root.customData.set("k", { value: "\u0002" })],
+    ["CustomData-Schlüssel in Meta mit U+FFFF", (v) => v.meta.customData.set("\uFFFF", { value: "x" })],
+    ["Gruppenname mit U+FFFE", (v) => (v.root.groups[0]!.name = "Bank\uFFFE")],
+    ["Anhang-Name mit U+0002", (v) => (v.root.entries[0]!.attachments[1]!.name = "offen.bin\u0002")],
+    ["ungeschützter Text im unbekannten Element", (v) => v.meta.unknown.push("<PluginData><Plain>x&#1;y</Plain></PluginData>")],
+    ["Attribut im unbekannten Element", (v) => v.root.unknown.push('<PluginData a="&#1;"/>')],
+    ["geschützter Wert mit einzelnem Surrogat", (v) => v.root.entries[0]!.strings.set("Password", { value: "ab\uD800", protected: true })],
+    [
+      "geschützter Wert mit einzelnem Surrogat im unbekannten Element",
+      (v) => v.root.entries[0]!.unknown.push('<PluginData><S Protected="True">&#xD800;</S></PluginData>'),
+    ],
+  ];
+
+  it.each(writeCases)("Schreiben verändert das Modell nie still, sondern lehnt ab: %s", (name, mutate) => {
+    const vault = sampleVault(true);
+    mutate(vault);
+    expectRejectedOnWrite(vault, name);
+  });
+});
+
+describe("Namensräume gibt es in KDBX nicht (Sicherheitsaudit xml-4, xml-5)", () => {
+  const entry = `<UUID>${testUuid(30)}</UUID><String><Key>Title</Key><Value>Versteckt</Value></String>`;
+  it.each([
+    ["xmlns:p an <KeePassFile>, <p:Data> in der Wurzelgruppe", doc({ group: "<p:Data>x</p:Data>" }).replace("<KeePassFile>", '<KeePassFile xmlns:p="urn:plugin">')],
+    ["xmlns:p an <Group>, <p:Data> darin", doc({ group: "<p:Data>x</p:Data>" }).replace("<Group>", '<Group xmlns:p="urn:plugin">')],
+    ["Attribut mit Präfix im unbekannten Element", doc({ meta: '<Data p:a="1">y</Data>' }).replace("<KeePassFile>", '<KeePassFile xmlns:p="urn:plugin">')],
+    ["Präfix am unbekannten Element selbst deklariert", doc({ meta: '<p:Data xmlns:p="urn:plugin">z</p:Data>' })],
+    ["<p:Entry>, das KeePassXC als Eintrag liest", doc({ group: `<p:Entry xmlns:p="urn:x">${entry}</p:Entry>` })],
+    ["Standard-Namensraum an <KeePassFile>", doc().replace("<KeePassFile>", '<KeePassFile xmlns="urn:x">')],
+    ["xml:space an einem Wert", doc({ group: '<Notes xml:space="preserve"> x </Notes>' })],
+  ])("Lesen lehnt ab: %s", (_name, xml) => {
+    expect(() => parse(xml)).toThrow(corrupt);
+  });
+
+  it("nachlässige Syntax, die KeePassXC ablehnt, wird auch hier abgelehnt (Sicherheitsaudit xml-5)", () => {
+    expect(() => parse(doc({ group: "<Notes Foo=bar>x</Notes>" }))).toThrow(corrupt);
+    expect(() => parse(doc({ group: '<Notes Foo="a"Bar="b">x</Notes>' }))).toThrow(corrupt);
+  });
+
+  it.each([
+    ["undeklariertes Präfix", "<p:Data>x</p:Data>"],
+    ["am Element deklariertes Präfix", '<p:Data xmlns:p="urn:x">x</p:Data>'],
+    ["Standard-Namensraum", '<Data xmlns="urn:x">x</Data>'],
+  ])("ein Modell mit Namensraum im unbekannten Element ist ein Modellfehler, kein KdbxError: %s", (_name, unknown) => {
+    const vault = sampleVault(true);
+    vault.root.unknown.push(unknown);
+    expectRejectedOnWrite(vault, unknown);
+  });
+});
+
+describe("Größe der XML-Datenbank (Sicherheitsaudit dos-4)", () => {
+  it("lehnt mehr als MAX_XML_BYTES ab, bevor die Bytes dekodiert und eingelesen werden", () => {
+    const bytes = new Uint8Array(MAX_XML_BYTES + 1).fill(0x20);
+    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow(corrupt);
+    expect(() => parseVaultXml(bytes, [], identityStream(), SETTINGS_41)).toThrow(/XML-Datenbank: XML ist zu groß \(mehr als 16 MiB\)/);
+  });
+
+  it("liest eine Datei, die genau MAX_XML_BYTES groß ist", () => {
+    const small = utf8Encode(doc());
+    const bytes = new Uint8Array(MAX_XML_BYTES).fill(0x20);
+    bytes.set(small);
+    expect(parseVaultXml(bytes, [], identityStream(), SETTINGS_41).root.name).toBe("Root");
   });
 });

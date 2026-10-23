@@ -15,7 +15,7 @@
  * sondern als Modellfehler gemeldet (RangeError/Error, kein KdbxError). Sonst würde eine
  * Datei hochgeladen, die danach weder Ownwarden noch KeePassXC öffnen kann.
  */
-import type { PoolBinary } from "../contracts";
+import { KdbxError, type PoolBinary } from "../contracts";
 import {
   NULL_UUID,
   type Attachment,
@@ -28,7 +28,7 @@ import {
   type Meta,
   type Vault,
 } from "../model";
-import { cloneXmlElement, parseXml, stripInvalidXmlChars, xmlElement, type XmlElement } from "./xml-dom";
+import { cloneXmlElement, parseXml, requireValidXmlChars, xmlElement, type XmlElement } from "./xml-dom";
 import { ENTRY_ELEMENTS, GROUP_ELEMENTS, META_ELEMENTS, ROOT_ELEMENTS } from "./xml-read";
 import { encodeBase64, encodeBool, encodeInteger, encodeTime, encodeUuid, formatTags } from "./xml-values";
 
@@ -247,7 +247,15 @@ class VaultWriter {
   private readonly parseUnknown = (xml: string): XmlElement => {
     let element = this.unknownCache.get(xml);
     if (element === undefined) {
-      element = parseXml(xml, "Modell: unbekanntes XML-Element");
+      try {
+        // allowInvalidChars: Geschützte Werte stehen hier im Klartext, als &#1; usw. (siehe
+        // serializeElement). Ungeschützter Text mit solchen Zeichen scheitert später an escapeText.
+        element = parseXml(xml, "Modell: unbekanntes XML-Element", { allowInvalidChars: true });
+      } catch (error) {
+        // Ein Fehler im Modell, keine kaputte Datei: kein KdbxError (Sicherheitsaudit xml-4).
+        if (error instanceof KdbxError) throw new Error(error.message, { cause: error });
+        throw error;
+      }
       this.unknownCache.set(xml, element);
     }
     // Kopie, weil encryptProtectedValues den Baum verändert: Ein gemeinsam genutztes
@@ -270,7 +278,7 @@ class VaultWriter {
       time("RecycleBinChanged", meta.recycleBinChanged),
       historyLimit("HistoryMaxItems", meta.historyMaxItems),
       historyLimit("HistoryMaxSize", meta.historyMaxSize),
-      ...this.buildCustomData(meta.customData),
+      ...this.buildCustomData(meta.customData, "Meta"),
     ];
     return xmlElement("Meta", arrange(known, meta.unknown, META_LAYOUT, this.parseUnknown));
   }
@@ -318,7 +326,7 @@ class VaultWriter {
     known.push(iconId(group.iconId));
     if (group.customIconUuid !== undefined) known.push(uuid("CustomIconUUID", group.customIconUuid));
     known.push(this.buildTimes(group.times));
-    known.push(...this.buildCustomData(group.customData));
+    known.push(...this.buildCustomData(group.customData, `Gruppe ${group.uuid}`));
     if (this.kdbx41 && group.previousParentGroup !== undefined) {
       known.push(uuid("PreviousParentGroup", group.previousParentGroup));
     }
@@ -345,15 +353,11 @@ class VaultWriter {
       if (entry.qualityCheck !== undefined) known.push(bool("QualityCheck", entry.qualityCheck));
       if (entry.previousParentGroup !== undefined) known.push(uuid("PreviousParentGroup", entry.previousParentGroup));
     }
-    const keysInFile = new Set<string>();
     for (const [key, value] of entry.strings) {
-      // Ungültige XML-Zeichen werden beim Schreiben entfernt. Fallen dadurch zwei Feldnamen
-      // zusammen ("PIN\u0001" und "PIN"), wäre die Datei für Ownwarden und KeePassXC kaputt.
-      const keyInFile = stripInvalidXmlChars(key);
-      if (keysInFile.has(keyInFile)) {
-        throw new Error(`Eintrag ${entry.uuid}: Feldname "${keyInFile}" kommt (nach Entfernen ungültiger Zeichen) doppelt vor.`);
-      }
-      keysInFile.add(keyInFile);
+      // In XML ungültige Zeichen kann die Datei nicht speichern. Früher wurden sie still
+      // entfernt; dann fielen z. B. "PIN" mit und ohne U+0001 zu einem Feld zusammen
+      // (Sicherheitsaudit xml-2). Jetzt: ablehnen, mit Eintrag und Feldname in der Meldung.
+      requireValidXmlChars(key, `Eintrag ${entry.uuid}: Feldname`);
       known.push(
         xmlElement("String", [
           text("Key", key),
@@ -362,7 +366,7 @@ class VaultWriter {
       );
     }
     known.push(...this.buildAttachments(entry));
-    known.push(...this.buildCustomData(entry.customData));
+    known.push(...this.buildCustomData(entry.customData, `Eintrag ${entry.uuid}`));
     // KeePassXC schreibt <History> bei jedem Eintrag (auch leer), nie in Verlaufseinträgen.
     // Ein Verlauf IM Verlaufseintrag ist im Format nicht vorgesehen und wird nicht geschrieben.
     if (!isHistoryItem) {
@@ -377,12 +381,12 @@ class VaultWriter {
     return entry.attachments.map((attachment) => {
       // Doppelte Namen kann keine KDBX-Anwendung darstellen (Anhänge sind dort ein
       // Wörterbuch); KeePassXC würde einen davon still verlieren. Lieber laut abbrechen.
-      // Verglichen wird der Name, wie er in der Datei steht (ohne ungültige XML-Zeichen).
-      const nameInFile = stripInvalidXmlChars(attachment.name);
-      if (names.has(nameInFile)) {
-        throw new Error(`Eintrag ${entry.uuid}: Anhang "${nameInFile}" ist doppelt vorhanden.`);
+      // Ungültige XML-Zeichen werden nicht mehr entfernt, sondern abgelehnt (wie bei Feldnamen).
+      requireValidXmlChars(attachment.name, `Eintrag ${entry.uuid}: Anhang-Name`);
+      if (names.has(attachment.name)) {
+        throw new Error(`Eintrag ${entry.uuid}: Anhang "${attachment.name}" ist doppelt vorhanden.`);
       }
-      names.add(nameInFile);
+      names.add(attachment.name);
       const ref = this.pool.add(attachment);
       return xmlElement("Binary", [text("Key", attachment.name), xmlElement("Value", [], { Ref: String(ref) })]);
     });
@@ -400,10 +404,13 @@ class VaultWriter {
     ]);
   }
 
-  /** <CustomData> nur, wenn es Einträge gibt (wie KeePassXC). */
-  private buildCustomData(customData: CustomData): XmlElement[] {
+  /** <CustomData> nur, wenn es Einträge gibt (wie KeePassXC). `owner` nennt Meta/Gruppe/Eintrag. */
+  private buildCustomData(customData: CustomData, owner: string): XmlElement[] {
     if (customData.size === 0) return [];
     const items = [...customData].map(([key, item]) => {
+      // Wie bei Feldnamen: Schlüssel mit ungültigen Zeichen ablehnen. Früher fielen z. B. "K" und
+      // "K" + U+0001 beim Schreiben still zusammen, beim Lesen gewann der letzte (Sicherheitsaudit xml-2).
+      requireValidXmlChars(key, `${owner}: CustomData-Schlüssel`);
       const children = [text("Key", key), text("Value", item.value)];
       if (this.kdbx41 && item.lastModified !== undefined) children.push(time("LastModificationTime", item.lastModified));
       return xmlElement("Item", children);
